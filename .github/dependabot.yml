@@ -1,0 +1,135 @@
+# Dependabot configuration for automated dependency updates
+version: 2
+
+updates:
+  # Python dependencies
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "wednesday"
+      time: "03:00"
+    open-pull-requests-limit: 5
+    reviewers:
+      - "@davidshih" # Update with your GitHub username
+    labels:
+      - "dependencies"
+      - "python"
+      - "automated"
+    commit-message:
+      prefix: "chore"
+      prefix-development: "chore"
+      include: "scope"
+    pull-request-branch-name:
+      separator: "-"
+    # Group updates to reduce PR noise
+    groups:
+      python-dev:
+        patterns:
+          - "pytest*"
+          - "black"
+          - "isort"
+          - "flake8"
+          - "mypy"
+        update-types:
+          - "minor"
+          - "patch"
+      python-security:
+        patterns:
+          - "bandit"
+          - "safety"
+        update-types:
+          - "minor"
+          - "patch"
+    # Ignore specific updates
+    ignore:
+      # Example: ignore major updates for critical packages
+      # - dependency-name: "flask"
+      #   update-types: ["version-update:semver-major"]
+    # Allow specific updates
+    allow:
+      - dependency-type: "all"
+    # Version requirements
+    versioning-strategy: "increase"
+
+  # JavaScript/Node dependencies
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "wednesday"
+      time: "03:00"
+    open-pull-requests-limit: 5
+    reviewers:
+      - "@davidshih" # Update with your GitHub username
+    labels:
+      - "dependencies"
+      - "javascript"
+      - "automated"
+    commit-message:
+      prefix: "chore"
+      prefix-development: "chore"
+      include: "scope"
+    pull-request-branch-name:
+      separator: "-"
+    # Group updates
+    groups:
+      npm-dev:
+        dependency-type: "development"
+        update-types:
+          - "minor"
+          - "patch"
+      npm-prod:
+        dependency-type: "production"
+        update-types:
+          - "patch"
+    # Ignore specific updates
+    ignore:
+      # Example: ignore updates for packages that often break
+      # - dependency-name: "webpack"
+      #   update-types: ["version-update:semver-major"]
+    versioning-strategy: "increase"
+
+  # GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "05:00"
+    open-pull-requests-limit: 5
+    reviewers:
+      - "@davidshih" # Update with your GitHub username
+    labels:
+      - "dependencies"
+      - "github-actions"
+      - "automated"
+    commit-message:
+      prefix: "ci"
+      include: "scope"
+    pull-request-branch-name:
+      separator: "-"
+
+  # Docker dependencies
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "05:00"
+    open-pull-requests-limit: 3
+    reviewers:
+      - "@davidshih" # Update with your GitHub username
+    labels:
+      - "dependencies"
+      - "docker"
+      - "automated"
+    commit-message:
+      prefix: "build"
+      include: "scope"
+
+# Security updates configuration
+# These are given priority and created immediately
+# regardless of schedule
+security-updates:
+  open-pull-requests-limit: 10

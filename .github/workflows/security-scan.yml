@@ -1,0 +1,381 @@
+name: Security Scan
+
+on:
+  push:
+    branches: [ master, main, develop ]
+  pull_request:
+    branches: [ master, main ]
+  schedule:
+    # Run security scan every Monday at 2 AM
+    - cron: '0 2 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  # Secret Detection
+  secret-scan:
+    name: Secret Detection
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: TruffleHog Secret Scan
+      uses: trufflesecurity/trufflehog@main
+      with:
+        path: ./
+        base: ${{ github.event.repository.default_branch }}
+        head: HEAD
+        extra_args: --debug --only-verified
+    
+    - name: Gitleaks Secret Scan
+      uses: gitleaks/gitleaks-action@v2
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Detect Secrets
+      run: |
+        pip install detect-secrets
+        detect-secrets scan --all-files --force-use-all-plugins --baseline .secrets.baseline || true
+        
+        # Check if new secrets were introduced
+        if [ -f .secrets.baseline ]; then
+          detect-secrets audit .secrets.baseline || echo "::warning::Potential secrets detected"
+        fi
+
+  # Dependency Vulnerability Scan
+  dependency-scan:
+    name: Dependency Vulnerability Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+        severity: 'CRITICAL,HIGH,MEDIUM'
+        ignore-unfixed: true
+    
+    - name: Upload Trivy results to GitHub Security
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: 'trivy-results.sarif'
+    
+    - name: Python Safety Check
+      if: hashFiles('requirements.txt') != ''
+      run: |
+        pip install safety
+        safety check --json --output safety-report.json || true
+        
+        if [ -f safety-report.json ]; then
+          echo "## Python Dependency Vulnerabilities" >> $GITHUB_STEP_SUMMARY
+          cat safety-report.json | python -m json.tool >> $GITHUB_STEP_SUMMARY
+        fi
+    
+    - name: NPM Audit
+      if: hashFiles('package-lock.json') != ''
+      run: |
+        npm audit --json > npm-audit.json || true
+        
+        if [ -f npm-audit.json ]; then
+          echo "## NPM Dependency Vulnerabilities" >> $GITHUB_STEP_SUMMARY
+          cat npm-audit.json | python -m json.tool >> $GITHUB_STEP_SUMMARY
+        fi
+    
+    - name: Check for outdated dependencies
+      run: |
+        if [ -f requirements.txt ]; then
+          pip install pip-audit
+          pip-audit --desc || echo "::warning::Vulnerable Python packages found"
+        fi
+        
+        if [ -f package.json ]; then
+          npx npm-check-updates || echo "::warning::Outdated npm packages found"
+        fi
+
+  # SAST (Static Application Security Testing)
+  sast-scan:
+    name: SAST Security Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v3
+      with:
+        languages: python, javascript
+        queries: security-and-quality
+    
+    - name: Autobuild
+      uses: github/codeql-action/autobuild@v3
+    
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v3
+      with:
+        category: "/language:python"
+    
+    - name: Semgrep Security Scan
+      uses: returntocorp/semgrep-action@v1
+      with:
+        config: >-
+          p/security-audit
+          p/secrets
+          p/owasp-top-ten
+          p/r2c-best-practices
+        generateSarif: true
+    
+    - name: Upload Semgrep results
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: semgrep.sarif
+      if: always()
+    
+    - name: Bandit Python Security Scan
+      if: hashFiles('**/*.py') != ''
+      run: |
+        pip install bandit
+        bandit -r . -f json -o bandit-report.json -ll || true
+        
+        if [ -f bandit-report.json ]; then
+          echo "## Bandit Security Findings" >> $GITHUB_STEP_SUMMARY
+          cat bandit-report.json | python -m json.tool >> $GITHUB_STEP_SUMMARY
+        fi
+
+  # Container Security Scan
+  container-scan:
+    name: Container Security Scan
+    runs-on: ubuntu-latest
+    if: hashFiles('Dockerfile') != ''
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Build Docker image for scanning
+      run: |
+        docker build -t local-scan:latest .
+    
+    - name: Run Trivy container scan
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: 'local-scan:latest'
+        format: 'sarif'
+        output: 'container-scan.sarif'
+        severity: 'CRITICAL,HIGH'
+    
+    - name: Upload container scan results
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: 'container-scan.sarif'
+    
+    - name: Docker Scout scan
+      uses: docker/scout-action@v1
+      with:
+        command: cves
+        image: local-scan:latest
+        only-severities: critical,high
+        exit-code: false
+    
+    - name: Scan with Snyk
+      continue-on-error: true
+      env:
+        SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+      run: |
+        if [ ! -z "$SNYK_TOKEN" ]; then
+          npm install -g snyk
+          snyk container test local-scan:latest --severity-threshold=high || true
+        fi
+
+  # Infrastructure as Code Security
+  iac-scan:
+    name: IaC Security Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Checkov IaC Scan
+      uses: bridgecrewio/checkov-action@master
+      with:
+        directory: .
+        quiet: true
+        soft_fail: true
+        framework: all
+        output_format: sarif
+        output_file_path: checkov.sarif
+    
+    - name: Upload Checkov results
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: checkov.sarif
+    
+    - name: Terrascan IaC scan
+      run: |
+        docker run --rm -v "$(pwd):/src" accurics/terrascan scan -d /src || true
+
+  # License Compliance Check
+  license-check:
+    name: License Compliance
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: License Finder
+      run: |
+        if [ -f requirements.txt ]; then
+          pip install pip-licenses
+          pip-licenses --from=mixed --format=json --output-file=licenses.json
+          
+          # Check for restrictive licenses
+          if grep -E '"(GPL|AGPL|LGPL)"' licenses.json; then
+            echo "::warning::Copyleft licenses detected. Please review compatibility."
+          fi
+        fi
+        
+        if [ -f package.json ]; then
+          npx license-checker --json --out licenses-npm.json
+          
+          # Check for problematic licenses
+          if grep -E '"(GPL|AGPL|LGPL)"' licenses-npm.json; then
+            echo "::warning::Copyleft licenses detected in npm dependencies."
+          fi
+        fi
+    
+    - name: FOSSA License Scan
+      continue-on-error: true
+      env:
+        FOSSA_API_KEY: ${{ secrets.FOSSA_API_KEY }}
+      run: |
+        if [ ! -z "$FOSSA_API_KEY" ]; then
+          curl -H 'Cache-Control: no-cache' https://raw.githubusercontent.com/fossas/fossa-cli/master/install-latest.sh | bash
+          fossa analyze
+          fossa test || echo "::warning::License compliance issues found"
+        fi
+
+  # Security Headers Check (for web applications)
+  security-headers:
+    name: Security Headers Check
+    runs-on: ubuntu-latest
+    if: contains(github.repository, 'transcribe')
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Check security headers in code
+      run: |
+        echo "## Security Headers Check" >> $GITHUB_STEP_SUMMARY
+        
+        # Check for security headers in Python Flask app
+        if [ -f app.py ]; then
+          echo "### Flask Security Headers" >> $GITHUB_STEP_SUMMARY
+          
+          headers=(
+            "X-Frame-Options"
+            "X-Content-Type-Options"
+            "Content-Security-Policy"
+            "X-XSS-Protection"
+            "Strict-Transport-Security"
+          )
+          
+          for header in "${headers[@]}"; do
+            if grep -q "$header" app.py; then
+              echo "✅ $header is set" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "⚠️ $header is missing" >> $GITHUB_STEP_SUMMARY
+            fi
+          done
+        fi
+
+  # OWASP Dependency Check
+  owasp-check:
+    name: OWASP Dependency Check
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Run OWASP Dependency Check
+      uses: dependency-check/Dependency-Check_Action@main
+      with:
+        project: ${{ github.repository }}
+        path: '.'
+        format: 'HTML'
+        args: >
+          --enableRetired
+          --enableExperimental
+    
+    - name: Upload OWASP results
+      uses: actions/upload-artifact@v4
+      with:
+        name: owasp-dependency-check-report
+        path: reports/
+
+  # Security Report Summary
+  security-report:
+    name: Security Report Summary
+    runs-on: ubuntu-latest
+    needs: [secret-scan, dependency-scan, sast-scan, container-scan, iac-scan, license-check, security-headers, owasp-check]
+    if: always()
+    
+    steps:
+    - name: Generate Security Summary
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const jobs = ${{ toJson(needs) }};
+          const failed = Object.entries(jobs).filter(([name, job]) => job.result === 'failure');
+          const warnings = Object.entries(jobs).filter(([name, job]) => job.result === 'success' && job.conclusion === 'warning');
+          
+          let report = '# 🔒 Security Scan Summary\n\n';
+          
+          if (failed.length === 0) {
+            report += '✅ **All security scans passed**\n\n';
+          } else {
+            report += `⚠️ **${failed.length} security scan(s) failed**\n\n`;
+            report += 'Failed scans:\n';
+            failed.forEach(([name, _]) => {
+              report += `- ${name}\n`;
+            });
+            report += '\n';
+          }
+          
+          report += '## Scan Results\n\n';
+          report += '| Scan Type | Status |\n';
+          report += '|-----------|--------|\n';
+          
+          Object.entries(jobs).forEach(([name, job]) => {
+            const emoji = job.result === 'success' ? '✅' : job.result === 'failure' ? '❌' : '⏭️';
+            report += `| ${name.replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase())} | ${emoji} |\n`;
+          });
+          
+          report += '\n## Recommendations\n\n';
+          report += '1. Review and fix any critical vulnerabilities immediately\n';
+          report += '2. Update dependencies with known vulnerabilities\n';
+          report += '3. Ensure no secrets are committed to the repository\n';
+          report += '4. Follow security best practices for your framework\n';
+          
+          // Post comment on PR
+          if (context.eventName === 'pull_request') {
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: report
+            });
+          }
+          
+          // Add to job summary
+          await core.summary.addRaw(report).write();

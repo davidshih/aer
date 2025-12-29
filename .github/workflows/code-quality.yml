@@ -1,0 +1,329 @@
+name: Code Quality
+
+on:
+  push:
+    branches: [ master, main, develop, 'feature/**' ]
+  pull_request:
+    branches: [ master, main, develop ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+
+jobs:
+  # Python Quality Checks
+  python-quality:
+    name: Python Code Quality
+    runs-on: ubuntu-latest
+    if: contains(github.repository, 'transcribe') || contains(github.event.head_commit.message, '[python]')
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install black isort flake8 pylint mypy bandit safety
+        pip install -r requirements.txt 2>/dev/null || true
+    
+    - name: Format with Black
+      id: black
+      run: |
+        black --check --diff . || echo "::warning::Code formatting issues found. Run 'black .' to fix."
+    
+    - name: Sort imports with isort
+      id: isort
+      run: |
+        isort --check-only --diff . || echo "::warning::Import sorting issues found. Run 'isort .' to fix."
+    
+    - name: Lint with flake8
+      id: flake8
+      run: |
+        # Stop the build if there are Python syntax errors or undefined names
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+        # Exit-zero treats all errors as warnings
+        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=120 --statistics \
+          --exclude=venv,env,.venv,__pycache__,*.pyc,*.pyo,build,dist
+    
+    - name: Lint with pylint
+      id: pylint
+      continue-on-error: true
+      run: |
+        pylint **/*.py --exit-zero --max-line-length=120 \
+          --disable=C0111,C0103,W0613,R0903,R0913,R0914 || true
+    
+    - name: Type check with mypy
+      id: mypy
+      continue-on-error: true
+      run: |
+        mypy . --ignore-missing-imports --no-error-summary || true
+    
+    - name: Security check with bandit
+      id: bandit
+      run: |
+        bandit -r . -ll -f json -o bandit-report.json || true
+        if [ -f bandit-report.json ]; then
+          echo "Security issues found:"
+          cat bandit-report.json | python -m json.tool
+        fi
+    
+    - name: Check dependencies with safety
+      id: safety
+      continue-on-error: true
+      run: |
+        safety check --json || echo "::warning::Vulnerable dependencies found"
+    
+    - name: Comment PR with results
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const output = `
+          ## 🐍 Python Code Quality Report
+          
+          | Check | Status |
+          |-------|--------|
+          | Black (Formatting) | ${{ steps.black.outcome == 'success' && '✅' || '⚠️' }} |
+          | isort (Imports) | ${{ steps.isort.outcome == 'success' && '✅' || '⚠️' }} |
+          | Flake8 (Linting) | ${{ steps.flake8.outcome == 'success' && '✅' || '⚠️' }} |
+          | Pylint | ${{ steps.pylint.outcome == 'success' && '✅' || 'ℹ️' }} |
+          | Mypy (Type Checking) | ${{ steps.mypy.outcome == 'success' && '✅' || 'ℹ️' }} |
+          | Bandit (Security) | ${{ steps.bandit.outcome == 'success' && '✅' || '⚠️' }} |
+          | Safety (Dependencies) | ${{ steps.safety.outcome == 'success' && '✅' || '⚠️' }} |
+          
+          💡 Run \`black . && isort .\` locally to auto-fix formatting issues.
+          `;
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: output
+          });
+
+  # JavaScript/TypeScript Quality Checks
+  javascript-quality:
+    name: JavaScript/TypeScript Code Quality
+    runs-on: ubuntu-latest
+    if: contains(github.repository, 'transcribe') || contains(github.event.head_commit.message, '[js]')
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+    
+    - name: Check if package.json exists
+      id: check_files
+      run: |
+        if [ -f package.json ]; then
+          echo "package_json=true" >> $GITHUB_OUTPUT
+        else
+          echo "package_json=false" >> $GITHUB_OUTPUT
+        fi
+    
+    - name: Install ESLint and Prettier
+      if: steps.check_files.outputs.package_json == 'false'
+      run: |
+        npm init -y
+        npm install --save-dev eslint prettier eslint-config-prettier eslint-plugin-prettier
+    
+    - name: Install dependencies
+      if: steps.check_files.outputs.package_json == 'true'
+      run: npm ci || npm install
+    
+    - name: Run ESLint
+      id: eslint
+      continue-on-error: true
+      run: |
+        npx eslint . --ext .js,.jsx,.ts,.tsx --format json --output-file eslint-report.json || true
+        if [ -f eslint-report.json ]; then
+          echo "ESLint issues found"
+        fi
+    
+    - name: Run Prettier check
+      id: prettier
+      continue-on-error: true
+      run: |
+        npx prettier --check "**/*.{js,jsx,ts,tsx,json,css,scss,md}" || echo "::warning::Formatting issues found. Run 'npx prettier --write .' to fix."
+    
+    - name: Check for console.log statements
+      id: console_check
+      run: |
+        if grep -r "console\.log" --include="*.js" --include="*.jsx" --include="*.ts" --include="*.tsx" --exclude-dir=node_modules --exclude-dir=dist --exclude-dir=build .; then
+          echo "::warning::console.log statements found in code"
+        fi
+
+  # CSS/SCSS Quality Checks
+  css-quality:
+    name: CSS/SCSS Code Quality
+    runs-on: ubuntu-latest
+    if: contains(github.repository, 'transcribe')
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+    
+    - name: Install stylelint
+      run: |
+        npm install --save-dev stylelint stylelint-config-standard stylelint-config-prettier
+    
+    - name: Create stylelint config if not exists
+      run: |
+        if [ ! -f .stylelintrc.json ]; then
+          echo '{
+            "extends": ["stylelint-config-standard", "stylelint-config-prettier"],
+            "rules": {
+              "selector-class-pattern": null,
+              "selector-id-pattern": null
+            }
+          }' > .stylelintrc.json
+        fi
+    
+    - name: Run stylelint
+      id: stylelint
+      continue-on-error: true
+      run: |
+        npx stylelint "**/*.{css,scss}" || echo "::warning::CSS/SCSS linting issues found"
+
+  # Markdown and Documentation Quality
+  docs-quality:
+    name: Documentation Quality
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Check markdown links
+      uses: gaurav-nelson/github-action-markdown-link-check@v1
+      with:
+        use-quiet-mode: 'yes'
+        use-verbose-mode: 'no'
+        check-modified-files-only: 'yes'
+    
+    - name: Lint markdown files
+      run: |
+        npm install -g markdownlint-cli
+        markdownlint '**/*.md' --ignore node_modules --ignore .github || echo "::warning::Markdown linting issues found"
+    
+    - name: Check for broken links in docs
+      continue-on-error: true
+      run: |
+        if [ -d "docs" ]; then
+          npx broken-link-checker ./docs --recursive || echo "::warning::Broken links found in documentation"
+        fi
+
+  # Code Complexity Analysis
+  complexity-analysis:
+    name: Code Complexity Analysis
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Install complexity tools
+      run: |
+        pip install radon lizard
+    
+    - name: Analyze Python complexity
+      run: |
+        echo "## Cyclomatic Complexity Analysis"
+        radon cc . -s -j | python -m json.tool || true
+        
+        echo "## Maintainability Index"
+        radon mi . -s || true
+        
+        echo "## Code Complexity with Lizard"
+        lizard . -l python -C 10 || echo "::warning::High complexity functions detected"
+    
+    - name: Upload complexity report
+      uses: actions/upload-artifact@v4
+      with:
+        name: complexity-report
+        path: |
+          complexity-*.json
+          complexity-*.txt
+
+  # Code Duplication Detection
+  duplication-check:
+    name: Code Duplication Check
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install jscpd
+      run: npm install -g jscpd
+    
+    - name: Run duplication check
+      run: |
+        jscpd . \
+          --ignore "**/{node_modules,venv,env,.venv,dist,build,coverage}/**" \
+          --min-lines 5 \
+          --min-tokens 50 \
+          --format "json" \
+          --output . \
+          --silent || echo "::warning::Code duplication detected"
+    
+    - name: Comment on PR if duplication found
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          if (fs.existsSync('jscpd-report.json')) {
+            const report = JSON.parse(fs.readFileSync('jscpd-report.json'));
+            if (report.statistics.total.percentage > 5) {
+              github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: `⚠️ **Code Duplication Alert**\n\nDuplication: ${report.statistics.total.percentage.toFixed(2)}%\n\nConsider refactoring duplicate code into reusable functions.`
+              });
+            }
+          }
+
+  # Overall Quality Report
+  quality-report:
+    name: Generate Quality Report
+    runs-on: ubuntu-latest
+    needs: [python-quality, javascript-quality, css-quality, docs-quality, complexity-analysis, duplication-check]
+    if: always()
+    
+    steps:
+    - name: Generate summary
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const jobs = ${{ toJson(needs) }};
+          const passed = Object.values(jobs).every(job => job.result === 'success' || job.result === 'skipped');
+          
+          const emoji = passed ? '✅' : '⚠️';
+          const status = passed ? 'All checks passed' : 'Some checks need attention';
+          
+          const summary = `# ${emoji} Code Quality Summary\n\n${status}\n\n`;
+          
+          await core.summary
+            .addHeading('Code Quality Report')
+            .addRaw(summary)
+            .write();

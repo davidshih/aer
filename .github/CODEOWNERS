@@ -1,0 +1,106 @@
+# CODEOWNERS file
+# This file defines who owns and reviews code in different parts of the repository
+# Each line is a file pattern followed by one or more owners
+# Later matches take precedence
+
+# Default owners for everything in the repo
+* @davidshih
+
+# Python backend code
+*.py @davidshih
+/app.py @davidshih
+/services/ @davidshih
+/routes/ @davidshih
+/utils/ @davidshih
+/middleware/ @davidshih
+/models/ @davidshih
+
+# Frontend code
+/static/ @davidshih
+/templates/ @davidshih
+*.html @davidshih
+*.css @davidshih
+*.js @davidshih
+*.jsx @davidshih
+*.ts @davidshih
+*.tsx @davidshih
+
+# Configuration files
+/config/ @davidshih
+*.json @davidshih
+*.yaml @davidshih
+*.yml @davidshih
+.env* @davidshih
+
+# CI/CD and GitHub configuration
+/.github/ @davidshih
+/.github/workflows/ @davidshih
+/.github/actions/ @davidshih
+
+# Docker configuration
+Dockerfile* @davidshih
+docker-compose*.yml @davidshih
+.dockerignore @davidshih
+
+# Documentation
+*.md @davidshih
+/docs/ @davidshih
+README* @davidshih
+CHANGELOG* @davidshih
+CONTRIBUTING* @davidshih
+LICENSE* @davidshih
+
+# Test files
+/tests/ @davidshih
+/test/ @davidshih
+*test*.py @davidshih
+*spec*.js @davidshih
+*spec*.ts @davidshih
+
+# Dependencies
+requirements*.txt @davidshih
+package.json @davidshih
+package-lock.json @davidshih
+Pipfile* @davidshih
+poetry.lock @davidshih
+
+# Security-sensitive files (require additional review)
+*auth*.py @davidshih
+*security*.py @davidshih
+*crypto*.py @davidshih
+*password*.py @davidshih
+*token*.py @davidshih
+*secret*.py @davidshih
+
+# AI/ML model files
+*whisper*.py @davidshih
+*openai*.py @davidshih
+*gemini*.py @davidshih
+*claude*.py @davidshih
+*translation*.py @davidshih
+*transcription*.py @davidshih
+
+# Database files
+/migrations/ @davidshih
+*model*.py @davidshih
+*schema*.py @davidshih
+*.sql @davidshih
+
+# Critical infrastructure files (require careful review)
+/app.py @davidshih
+/.github/workflows/deploy*.yml @davidshih
+/start.sh @davidshih
+
+# Add more team members as needed:
+# /frontend/ @frontend-team
+# /backend/ @backend-team
+# /docs/ @docs-team
+
+# Example of multiple owners:
+# /shared/ @davidshih @team-lead @senior-dev
+
+# Example of team ownership:
+# /mobile/ @mobile-team
+
+# You can also use email addresses:
+# /legal/ legal@company.com

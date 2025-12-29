@@ -1,0 +1,222 @@
+# CodeRabbit AI Review Configuration
+# This file configures AI-powered code review settings
+
+# Review settings
+reviews:
+  # Enable automatic reviews on pull requests
+  auto_review:
+    enabled: true
+    # Review drafts PRs
+    drafts: false
+    # Review PRs from forks
+    forks: true
+    
+  # Review focus areas
+  focus_areas:
+    - security
+    - performance
+    - best_practices
+    - code_quality
+    - documentation
+    - tests
+    
+  # Severity levels to report
+  severity_levels:
+    - critical
+    - high
+    - medium
+    - low
+    - info
+    
+  # Custom instructions for the AI reviewer
+  instructions: |
+    Please focus on:
+    1. Security vulnerabilities and potential exploits
+    2. Performance bottlenecks and optimization opportunities
+    3. Code maintainability and readability
+    4. Proper error handling and edge cases
+    5. Consistency with existing codebase patterns
+    6. Test coverage for new functionality
+    7. Documentation completeness
+    
+    For Python code:
+    - Check for proper type hints
+    - Verify async/await usage
+    - Look for potential memory leaks
+    - Check for SQL injection vulnerabilities
+    - Verify proper exception handling
+    
+    For JavaScript/TypeScript:
+    - Check for XSS vulnerabilities
+    - Verify proper Promise handling
+    - Look for memory leaks in event listeners
+    - Check for proper null/undefined handling
+    
+    Always provide:
+    - Clear explanation of the issue
+    - Concrete fix suggestions using GitHub suggestion syntax
+    - Severity level (critical/high/medium/low)
+    - Link to relevant documentation when applicable
+
+# Language-specific settings
+languages:
+  python:
+    # Python-specific checks
+    checks:
+      - type_hints
+      - docstrings
+      - pep8_compliance
+      - security_patterns
+      - async_patterns
+    # Ignore patterns
+    ignore:
+      - "*_test.py"
+      - "test_*.py"
+      - "migrations/*.py"
+      
+  javascript:
+    checks:
+      - eslint_rules
+      - security_patterns
+      - react_best_practices
+      - async_patterns
+    ignore:
+      - "*.min.js"
+      - "dist/**"
+      - "build/**"
+      
+  typescript:
+    checks:
+      - type_safety
+      - eslint_rules
+      - security_patterns
+      - react_best_practices
+    ignore:
+      - "*.d.ts"
+      - "dist/**"
+
+# File patterns to ignore
+ignore_patterns:
+  - "**/__pycache__/**"
+  - "**/node_modules/**"
+  - "**/venv/**"
+  - "**/.venv/**"
+  - "**/env/**"
+  - "**/dist/**"
+  - "**/build/**"
+  - "**/*.min.js"
+  - "**/*.min.css"
+  - "**/vendor/**"
+  - "**/third_party/**"
+  - "**/.git/**"
+  - "**/migrations/**"
+  - "**/fixtures/**"
+  - "**/*.lock"
+  - "**/package-lock.json"
+
+# Auto-fix settings
+auto_fix:
+  enabled: true
+  # Types of fixes to automatically suggest
+  fix_types:
+    - formatting
+    - imports
+    - type_hints
+    - simple_bugs
+    - security_patches
+  # Maximum number of auto-fix suggestions per PR
+  max_suggestions: 20
+
+# Comment settings
+comments:
+  # Group similar issues together
+  group_similar: true
+  # Maximum comments per PR
+  max_comments: 30
+  # Comment style
+  style: "constructive" # Options: concise, detailed, constructive
+  # Add emoji to comments
+  use_emoji: true
+  # Include code metrics
+  include_metrics: true
+
+# Security settings
+security:
+  # Check for secrets and credentials
+  check_secrets: true
+  # Check for vulnerable dependencies
+  check_dependencies: true
+  # Check for common security patterns
+  check_patterns: true
+  # Security frameworks to check against
+  frameworks:
+    - owasp_top_10
+    - sans_top_25
+    - cwe_top_25
+
+# Performance settings
+performance:
+  # Check for performance issues
+  enabled: true
+  # Performance patterns to check
+  patterns:
+    - n_plus_one_queries
+    - inefficient_loops
+    - memory_leaks
+    - blocking_io
+    - unnecessary_re_renders
+
+# Custom rules
+custom_rules:
+  - name: "No console.log in production"
+    pattern: "console\\.log"
+    message: "Remove console.log statements before merging"
+    severity: "medium"
+    file_pattern: "*.js,*.jsx,*.ts,*.tsx"
+    
+  - name: "Use proper error handling"
+    pattern: "except:\\s*pass"
+    message: "Avoid bare except with pass - handle errors properly"
+    severity: "high"
+    file_pattern: "*.py"
+    
+  - name: "No hardcoded secrets"
+    pattern: "(api_key|password|secret|token)\\s*=\\s*[\"'][^\"']+[\"']"
+    message: "Do not hardcode secrets - use environment variables"
+    severity: "critical"
+    file_pattern: "*"
+
+# Integration settings
+integrations:
+  # Slack notifications
+  slack:
+    enabled: false
+    webhook_url: "" # Set via environment variable
+    notify_on:
+      - critical_issues
+      - security_vulnerabilities
+      
+  # GitHub settings
+  github:
+    # Add labels based on review findings
+    auto_label: true
+    # Request reviews from code owners
+    request_review: true
+    # Set status checks
+    status_check: true
+    
+# Advanced settings
+advanced:
+  # Use multiple AI models for consensus
+  multi_model_review: false
+  # Models to use (if multi_model_review is true)
+  models:
+    - gpt-4-turbo-preview
+    - claude-3-opus
+    - gemini-pro
+  # Require consensus threshold (percentage)
+  consensus_threshold: 66
+  # Cache reviews for similar code patterns
+  use_cache: true
+  # Cache TTL in seconds
+  cache_ttl: 86400

@@ -1,0 +1,387 @@
+name: AI Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  pull_request_review_comment:
+    types: [created, edited]
+  issue_comment:
+    types: [created, edited]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'Pull Request number to review'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  checks: write
+
+env:
+  # AI Model Selection (set your preferred model)
+  AI_PROVIDER: ${{ vars.AI_PROVIDER || 'openai' }} # Options: openai, anthropic, google, ollama
+  AI_MODEL: ${{ vars.AI_MODEL || 'gpt-4-turbo-preview' }}
+  
+  # Review Settings
+  MAX_REVIEW_LINES: 1000
+  REVIEW_COMMENT_PREFIX: '🤖 AI Review'
+  ENABLE_AUTO_FIX: true
+  ENABLE_SECURITY_SCAN: true
+  
+jobs:
+  ai-review:
+    name: AI Code Review
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'workflow_dispatch' || 
+      (github.event.pull_request.draft == false && 
+       !contains(github.event.pull_request.labels.*.name, 'skip-ai-review'))
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Get PR Details
+      id: pr_details
+      uses: actions/github-script@v7
+      with:
+        script: |
+          let pr_number;
+          
+          if (context.eventName === 'workflow_dispatch') {
+            pr_number = context.payload.inputs.pr_number || 
+                       (await github.rest.pulls.list({
+                         owner: context.repo.owner,
+                         repo: context.repo.repo,
+                         state: 'open',
+                         per_page: 1
+                       })).data[0]?.number;
+          } else if (context.eventName === 'issue_comment') {
+            pr_number = context.issue.number;
+          } else {
+            pr_number = context.payload.pull_request.number;
+          }
+          
+          if (!pr_number) {
+            core.setFailed('No PR number found');
+            return;
+          }
+          
+          const { data: pr } = await github.rest.pulls.get({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            pull_number: pr_number
+          });
+          
+          core.setOutput('pr_number', pr_number);
+          core.setOutput('base_sha', pr.base.sha);
+          core.setOutput('head_sha', pr.head.sha);
+          return pr;
+    
+    # OpenAI GPT Review
+    - name: OpenAI Code Review
+      if: env.AI_PROVIDER == 'openai'
+      env:
+        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const { execSync } = require('child_process');
+          const fs = require('fs');
+          
+          // Get diff
+          const diff = execSync(`git diff ${{ steps.pr_details.outputs.base_sha }}..${{ steps.pr_details.outputs.head_sha }}`, { maxBuffer: 10 * 1024 * 1024 }).toString();
+          
+          // Prepare review prompt
+          const prompt = `
+          You are an expert code reviewer. Review the following code changes and provide:
+          1. Security vulnerabilities or concerns
+          2. Performance issues
+          3. Code quality problems (maintainability, readability)
+          4. Best practice violations
+          5. Potential bugs
+          
+          For each issue found:
+          - Explain the problem clearly
+          - Suggest a specific fix
+          - Rate severity: 🔴 Critical, 🟡 Warning, 🟢 Suggestion
+          
+          Format suggestions using GitHub's suggestion syntax when applicable:
+          \`\`\`suggestion
+          fixed code here
+          \`\`\`
+          
+          Code diff to review:
+          \`\`\`diff
+          ${diff.substring(0, 50000)}
+          \`\`\`
+          `;
+          
+          // Call OpenAI API
+          const response = await fetch('https://api.openai.com/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              model: '${{ env.AI_MODEL }}',
+              messages: [{ role: 'user', content: prompt }],
+              temperature: 0.2,
+              max_tokens: 4000
+            })
+          });
+          
+          const data = await response.json();
+          const review = data.choices[0].message.content;
+          
+          // Post review comment
+          await github.rest.issues.createComment({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: ${{ steps.pr_details.outputs.pr_number }},
+            body: `## ${{ env.REVIEW_COMMENT_PREFIX }}\n\n${review}\n\n---\n*Reviewed by ${{ env.AI_MODEL }}*`
+          });
+    
+    # Claude AI Review (Anthropic)
+    - name: Claude Code Review
+      if: env.AI_PROVIDER == 'anthropic'
+      env:
+        ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        # Get the diff
+        DIFF=$(git diff ${{ steps.pr_details.outputs.base_sha }}..${{ steps.pr_details.outputs.head_sha }})
+        
+        # Create review using Claude API
+        REVIEW=$(curl -X POST https://api.anthropic.com/v1/messages \
+          -H "x-api-key: $ANTHROPIC_API_KEY" \
+          -H "anthropic-version: 2023-06-01" \
+          -H "content-type: application/json" \
+          -d "{
+            \"model\": \"claude-3-opus-20240229\",
+            \"max_tokens\": 4000,
+            \"messages\": [{
+              \"role\": \"user\",
+              \"content\": \"Review this code diff for security, performance, and quality issues. Provide specific suggestions using GitHub suggestion syntax. Diff: \n\`\`\`diff\n${DIFF:0:50000}\n\`\`\`\"
+            }]
+          }" | jq -r '.content[0].text')
+        
+        # Post review
+        gh pr comment ${{ steps.pr_details.outputs.pr_number }} --body "## ${{ env.REVIEW_COMMENT_PREFIX }}
+
+        $REVIEW
+        
+        ---
+        *Reviewed by Claude 3*"
+    
+    # Google Gemini Review
+    - name: Gemini Code Review
+      if: env.AI_PROVIDER == 'google'
+      env:
+        GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        pip install google-generativeai
+        python - <<EOF
+        import google.generativeai as genai
+        import os
+        import subprocess
+        import json
+        
+        genai.configure(api_key=os.environ['GOOGLE_API_KEY'])
+        model = genai.GenerativeModel('gemini-pro')
+        
+        # Get diff
+        diff = subprocess.check_output(['git', 'diff', 
+          '${{ steps.pr_details.outputs.base_sha }}..{{ steps.pr_details.outputs.head_sha }}'],
+          text=True)[:50000]
+        
+        prompt = f"""Review this code for issues. Focus on:
+        1. Security vulnerabilities
+        2. Performance problems  
+        3. Code quality
+        4. Best practices
+        
+        Provide specific fixes using GitHub suggestion syntax.
+        
+        Diff:
+        ```diff
+        {diff}
+        ```"""
+        
+        response = model.generate_content(prompt)
+        
+        # Post review via gh CLI
+        subprocess.run(['gh', 'pr', 'comment', '${{ steps.pr_details.outputs.pr_number }}',
+                       '--body', f"## ${{ env.REVIEW_COMMENT_PREFIX }}\n\n{response.text}\n\n---\n*Reviewed by Gemini*"])
+        EOF
+    
+    # Free/Open Source Alternative - Using GitHub Copilot (if available)
+    - name: GitHub Copilot Review
+      if: env.AI_PROVIDER == 'copilot'
+      uses: github/copilot-pr-review@v1
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+    
+    # Security-focused review
+    - name: Security Analysis
+      if: env.ENABLE_SECURITY_SCAN == 'true'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const checks = [];
+          
+          // Check for hardcoded secrets
+          const secretPatterns = [
+            /api[_\-]?key\s*=\s*["'][^"']+["']/gi,
+            /password\s*=\s*["'][^"']+["']/gi,
+            /token\s*=\s*["'][^"']+["']/gi,
+            /secret\s*=\s*["'][^"']+["']/gi,
+            /private[_\-]?key\s*=\s*["'][^"']+["']/gi
+          ];
+          
+          const { execSync } = require('child_process');
+          const diff = execSync(`git diff ${{ steps.pr_details.outputs.base_sha }}..${{ steps.pr_details.outputs.head_sha }} --name-only`).toString();
+          const files = diff.trim().split('\n');
+          
+          for (const file of files) {
+            try {
+              const content = execSync(`git show HEAD:${file}`).toString();
+              for (const pattern of secretPatterns) {
+                if (pattern.test(content)) {
+                  checks.push(`⚠️ Potential secret detected in ${file}`);
+                }
+              }
+            } catch (e) {
+              // File might be deleted
+            }
+          }
+          
+          if (checks.length > 0) {
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ steps.pr_details.outputs.pr_number }},
+              body: `## 🔒 Security Check\n\n${checks.join('\n')}\n\nPlease review and remove any hardcoded secrets.`
+            });
+          }
+    
+    # Line-by-line review for specific file types
+    - name: Detailed Code Review
+      if: always()
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const { execSync } = require('child_process');
+          
+          // Get changed files
+          const files = execSync(`git diff --name-only ${{ steps.pr_details.outputs.base_sha }}..${{ steps.pr_details.outputs.head_sha }}`).toString().trim().split('\n');
+          
+          const comments = [];
+          const fileExtensions = ['.py', '.js', '.ts', '.jsx', '.tsx', '.java', '.go', '.rs'];
+          
+          for (const file of files) {
+            if (!fileExtensions.some(ext => file.endsWith(ext))) continue;
+            
+            try {
+              const diff = execSync(`git diff ${{ steps.pr_details.outputs.base_sha }}..${{ steps.pr_details.outputs.head_sha }} -- ${file}`).toString();
+              
+              // Basic checks
+              if (diff.includes('console.log') && file.endsWith('.js')) {
+                comments.push({
+                  path: file,
+                  body: '💡 Consider removing console.log statements before merging'
+                });
+              }
+              
+              if (diff.includes('TODO') || diff.includes('FIXME')) {
+                comments.push({
+                  path: file,
+                  body: '📝 This PR introduces new TODO/FIXME comments. Please address them or create tracking issues.'
+                });
+              }
+              
+              if (diff.includes('sleep(') || diff.includes('time.sleep')) {
+                comments.push({
+                  path: file,
+                  body: '⏱️ Sleep statements detected. Consider using async/await or proper scheduling instead.'
+                });
+              }
+            } catch (e) {
+              console.log(`Error processing ${file}: ${e.message}`);
+            }
+          }
+          
+          // Post review comments if any
+          if (comments.length > 0) {
+            for (const comment of comments) {
+              console.log(`Adding comment to ${comment.path}: ${comment.body}`);
+            }
+          }
+    
+    # Summary and metrics
+    - name: Generate Review Summary
+      if: always()
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const { execSync } = require('child_process');
+          
+          // Calculate metrics
+          const stats = execSync(`git diff --stat ${{ steps.pr_details.outputs.base_sha }}..${{ steps.pr_details.outputs.head_sha }}`).toString();
+          const additions = (stats.match(/\d+ insertion/)?.[0]?.match(/\d+/)?.[0]) || 0;
+          const deletions = (stats.match(/\d+ deletion/)?.[0]?.match(/\d+/)?.[0]) || 0;
+          
+          // Determine PR size
+          const totalChanges = parseInt(additions) + parseInt(deletions);
+          let size = '🟢 Small';
+          if (totalChanges > 1000) size = '🔴 Extra Large';
+          else if (totalChanges > 500) size = '🟠 Large';
+          else if (totalChanges > 100) size = '🟡 Medium';
+          
+          const summary = `
+          ## 📊 PR Metrics
+          
+          - **Size**: ${size} (${totalChanges} lines)
+          - **Additions**: +${additions}
+          - **Deletions**: -${deletions}
+          - **Files Changed**: ${stats.split('\n').length - 2}
+          
+          ### Review Checklist
+          - [ ] No hardcoded secrets
+          - [ ] No console.log statements
+          - [ ] Tests included
+          - [ ] Documentation updated
+          - [ ] Performance impact considered
+          - [ ] Security implications reviewed
+          `;
+          
+          await github.rest.issues.createComment({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: ${{ steps.pr_details.outputs.pr_number }},
+            body: summary
+          });
+    
+    # Set status check
+    - name: Set Review Status
+      if: always()
+      uses: actions/github-script@v7
+      with:
+        script: |
+          await github.rest.repos.createCommitStatus({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            sha: '${{ steps.pr_details.outputs.head_sha }}',
+            state: 'success',
+            target_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/pull/${{ steps.pr_details.outputs.pr_number }}`,
+            description: 'AI review completed',
+            context: 'ai-code-review'
+          });
