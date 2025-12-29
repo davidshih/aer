@@ -1,0 +1,7 @@
+msal>=1.24.0
+requests>=2.31.0
+openpyxl>=3.1.2
+pandas>=2.0.0
+python-dotenv>=1.0.0
+ipywidgets>=8.0.0
+jupyterlab>=4.0.0
