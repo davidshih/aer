@@ -1,4 +1,4 @@
-# === Cell 6: Email Notification System (High Readability UI) ===
+# === Cell 6: Email Notification System (Subject & Body Preview) ===
 import ipywidgets as widgets
 from urllib.parse import quote
 from datetime import datetime, timedelta
@@ -8,6 +8,8 @@ from IPython.display import display, clear_output
 
 # --- 1. Helper Functions ---
 def get_email(name): 
+    """Attempts to find email via Graph API."""
+    if not name: return ""
     try:
         clean = quote(name.split("(")[0].strip())
         url = f"https://graph.microsoft.com/v1.0/users?$filter=startswith(displayName,'{clean}')&$select=mail,userPrincipalName"
@@ -39,6 +41,8 @@ else:
     final_targets = []
     notes_db = manual_data_store if 'manual_data_store' in globals() else {}
 
+    print("🔍 Looking up emails...")
+    
     for _, r in targets.iterrows():
         app_key = f"{r['Category']} > {r['App_Name']}"
         rev_key = r['reviewer']
@@ -60,13 +64,22 @@ else:
     target_df = pd.DataFrame(final_targets)
 
     # --- 3. UI Construction ---
+    clear_output()
+    
     if target_df.empty:
         display(widgets.HTML("<h3>✅ Everyone is done! No emails needed.</h3>"))
     else:
-        # Global Subject & Template
-        w_subject = widgets.Text(value="[Action Required] Overdue: Access Entitlement Review", description="<b>Subject:</b>", layout=widgets.Layout(width='98%'))
+        # --- GLOBAL SETTINGS ---
         
-        default_tpl = (
+        # Subject Template
+        default_subj = "[Action Required] Access Review: {app_name} (Due: {due_date})"
+        w_subject_tpl = widgets.Text(value=default_subj, description="<b>Subject Tpl:</b>", placeholder="Use {app_name} and {due_date}", layout=widgets.Layout(width='98%'))
+        
+        # Global CC
+        w_cc_global = widgets.Text(value="", description="<b>Global CC:</b>", placeholder="manager@company.com", layout=widgets.Layout(width='50%'))
+        
+        # Body Template
+        default_body = (
             "Hi {name},<br><br>"
             "This is a reminder that the access review for <b>{app_name}</b> is pending.<br>"
             "Expected Completion: <b>{due_date}</b>.<br><br>"
@@ -74,128 +87,144 @@ else:
             "<li>Link: <a href='{link}'>Click here to review</a></li></ul><br>"
             "Please complete this as soon as possible."
         )
+        w_body_tpl = widgets.Textarea(value=default_body.replace("<br>", "\n"), layout=widgets.Layout(width='100%', height='100px'))
         
-        w_tpl_editor = widgets.Textarea(value=default_tpl.replace("<br>", "\n"), layout=widgets.Layout(width='100%', height='100px'))
-        btn_apply_tpl = widgets.Button(description="🔄 Apply Template to All Rows", button_style='info', layout=widgets.Layout(width='300px'))
+        btn_update_preview = widgets.Button(description="🔄 Refresh Previews", button_style='info', layout=widgets.Layout(width='200px'))
         
+        # --- BUILD ROWS ---
         rows_container = []
         row_logic_map = {}
         
-        display(widgets.HTML(f"<h3>📧 Send Overdue Notifications ({len(target_df)} Users)</h3>"))
+        display(widgets.HTML(f"<h3>📧 Email Sender ({len(target_df)} Users)</h3>"))
         
         for idx, r in target_df.iterrows():
             key = f"{idx}_{r['reviewer']}"
             ctx = {'name': r['reviewer'], 'missing': r['missing'], 'link': r['folder_url'], 'app_name': r['App_Name'], 'due_date': r['due_date']}
             
-            # --- COLUMN 1: CHECKBOX & INFO (Width: 30%) ---
+            # Col 1: Info (30%)
             w_chk = widgets.Checkbox(value=True, layout=widgets.Layout(width='30px'))
+            email_color = "#0078d4" if r['email'] else "red"
+            email_status = "" if r['email'] else "(No Email)"
             
             info_html = (
                 f"<div style='line-height:1.6; font-family:sans-serif;'>"
                 f"<span style='font-size:14px; color:#555'>📂 {r['App_Name']}</span><br>"
-                f"<span style='font-size:16px; font-weight:bold; color:#0078d4'>{r['reviewer']}</span><br>"
+                f"<span style='font-size:16px; font-weight:bold; color:{email_color}'>{r['reviewer']} {email_status}</span><br>"
                 f"<span style='font-size:13px; color:#d13438'>⚠️ Missing: <b>{r['missing']}</b> items</span><br>"
                 f"<span style='font-size:12px; color:#666'>📅 Due: {r['due_date']}</span>"
                 f"</div>"
             )
-            w_info = widgets.HTML(info_html, layout=widgets.Layout(width='280px'))
-            col_1 = widgets.HBox([w_chk, w_info], layout=widgets.Layout(width='30%'))
+            col_1 = widgets.HBox([w_chk, widgets.HTML(info_html, layout=widgets.Layout(width='280px'))], layout=widgets.Layout(width='30%'))
 
-            # --- COLUMN 2: MESSAGE PREVIEW (Width: 45%) ---
-            # Using HTML widget with border to simulate a preview window
-            initial_body = default_tpl.format(**ctx)
+            # Col 2: Previews (45%)
+            # A. Subject Preview
+            try:
+                subj_txt = default_subj.format(**ctx)
+            except: subj_txt = default_subj
+            w_subj_preview = widgets.HTML(f"<div style='background:#f3f2f1; padding:4px; border-bottom:1px solid #ccc; font-weight:bold; font-size:12px; color:#333'>{subj_txt}</div>")
+            
+            # B. Body Preview
+            body_txt = default_body.format(**ctx)
             w_body_preview = widgets.HTML(
-                value=f"<div style='font-family:sans-serif; font-size:12px; padding:8px'>{initial_body}</div>",
-                layout=widgets.Layout(width='95%', height='120px', border='1px solid #e0e0e0', overflow_y='auto')
+                value=f"<div style='font-family:sans-serif; font-size:12px; padding:8px'>{body_txt}</div>",
+                layout=widgets.Layout(width='100%', height='100px', overflow_y='auto')
             )
-            col_2 = widgets.VBox([widgets.Label("Message Preview:"), w_body_preview], layout=widgets.Layout(width='45%', padding='0 10px'))
+            
+            # Container for Previews (simulating an email window)
+            preview_box = widgets.VBox([w_subj_preview, w_body_preview], layout=widgets.Layout(width='95%', border='1px solid #e0e0e0', margin='0 10px'))
+            col_2 = widgets.VBox([widgets.Label("Message Preview:"), preview_box], layout=widgets.Layout(width='45%'))
 
-            # --- COLUMN 3: ACTIONS (Width: 25%) ---
+            # Col 3: Actions (25%)
             w_email = widgets.Text(value=r['email'], placeholder="Email Address", description="To:", layout=widgets.Layout(width='95%'))
             w_btn_send = widgets.Button(description="🚀 Send Email", button_style='warning', layout=widgets.Layout(width='95%', height='40px'))
             col_3 = widgets.VBox([w_email, widgets.HTML("<br>"), w_btn_send], layout=widgets.Layout(width='25%', align_items='center', justify_content='center'))
 
-            # --- ROW CONTAINER ---
-            # Height set to 140px for readability
+            # Row Container
             row_box = widgets.HBox([col_1, col_2, col_3], 
-                                   layout=widgets.Layout(
-                                       height='150px', # Generous height
-                                       border='1px solid #ccc', 
-                                       margin='10px 0', 
-                                       padding='10px',
-                                       align_items='center',
-                                       background_color="#fcfcfc"
-                                   ))
+                                   layout=widgets.Layout(height='160px', border='1px solid #ccc', margin='10px 0', padding='10px', align_items='center', background_color="#fcfcfc"))
             
             rows_container.append(row_box)
             
-            # Logic Map for Template updates & Sending
             row_logic_map[key] = {
                 'ctx': ctx, 
-                'w_preview': w_body_preview, 
+                'w_subj_prev': w_subj_preview, 
+                'w_body_prev': w_body_preview, 
                 'w_email': w_email, 
-                'w_btn': w_btn_send,
+                'w_btn': w_btn_send, 
                 'w_chk': w_chk
             }
 
-            # --- SEND EVENT ---
-            def create_send_handler(k):
-                def on_send_click(b):
+            # --- SEND HANDLER ---
+            def create_sender(k):
+                def on_send(b):
                     data = row_logic_map[k]
                     if not data['w_email'].value:
                         b.description = "❌ Missing Email"; return
                     
                     b.disabled = True; b.description = "Sending..."
                     
-                    # Generate final HTML from Template Editor (to ensure latest edits are captured)
-                    current_tpl = w_tpl_editor.value.replace("\n", "<br>")
-                    final_html = current_tpl.format(**data['ctx'])
+                    # 1. Format Content using Global Templates
+                    tpl_subj = w_subject_tpl.value
+                    tpl_body = w_body_tpl.value.replace("\n", "<br>")
+                    try:
+                        final_subj = tpl_subj.format(**data['ctx'])
+                        final_body = tpl_body.format(**data['ctx'])
+                    except:
+                        final_subj = tpl_subj; final_body = tpl_body
+                        
+                    # 2. Recipients
+                    to_list = [{"emailAddress": {"address": data['w_email'].value}}]
+                    cc_list = []
+                    if w_cc_global.value.strip():
+                        cc_list.append({"emailAddress": {"address": w_cc_global.value.strip()}})
                     
-                    # Graph API Call
+                    # 3. API
                     url = f"https://graph.microsoft.com/v1.0/users/{SENDER_EMAIL}/sendMail"
-                    payload = {
-                        "message": {
-                            "subject": w_subject.value, 
-                            "body": {"contentType": "HTML", "content": final_html}, 
-                            "toRecipients": [{"emailAddress": {"address": data['w_email'].value}}]
-                        }
-                    }
+                    payload = {"message": {"subject": final_subj, "body": {"contentType": "HTML", "content": final_body}, "toRecipients": to_list, "ccRecipients": cc_list}}
+                    
                     try:
                         resp = requests.post(url, headers={**headers, "Content-Type": "application/json"}, json=payload)
                         if resp.status_code == 202:
                             b.button_style = 'success'; b.description = "✅ Sent"
-                            data['w_chk'].value = False # Uncheck
+                            data['w_chk'].value = False
                         else:
                             b.button_style = 'danger'; b.description = "❌ Failed"
                             print(f"Err: {resp.text}")
                     except Exception as e:
                         b.button_style = 'danger'; b.description = "❌ Error"
-                        print(str(e))
+                        print(e)
                     finally:
                         if b.description != "✅ Sent": b.disabled = False
-                return on_send_click
+                return on_send
 
-            w_btn_send.on_click(create_send_handler(key))
+            w_btn_send.on_click(create_sender(key))
 
-        # --- TEMPLATE UPDATE EVENT ---
-        def update_all_previews(b):
-            raw_tpl = w_tpl_editor.value.replace("\n", "<br>")
-            for k, data in row_logic_map.items():
+        # --- UPDATE PREVIEWS HANDLER ---
+        def update_previews(b):
+            raw_body = w_body_tpl.value.replace("\n", "<br>")
+            raw_subj = w_subject_tpl.value
+            
+            for k, d in row_logic_map.items():
                 try:
-                    new_html = raw_tpl.format(**data['ctx'])
-                    data['w_preview'].value = f"<div style='font-family:sans-serif; font-size:12px; padding:8px'>{new_html}</div>"
+                    # Update Subject Preview Widget
+                    new_subj = raw_subj.format(**d['ctx'])
+                    d['w_subj_prev'].value = f"<div style='background:#f3f2f1; padding:4px; border-bottom:1px solid #ccc; font-weight:bold; font-size:12px; color:#333'>{new_subj}</div>"
+                    
+                    # Update Body Preview Widget
+                    new_body = raw_body.format(**d['ctx'])
+                    d['w_body_prev'].value = f"<div style='font-family:sans-serif; font-size:12px; padding:8px'>{new_body}</div>"
                 except: pass
         
-        btn_apply_tpl.on_click(update_all_previews)
+        btn_update_preview.on_click(update_previews)
 
-        # --- FINAL LAYOUT ---
-        top_panel = widgets.VBox([
-            w_subject,
-            widgets.Label("Email Body Template: (Use {name}, {app_name}, {due_date}, {missing}, {link})"),
-            widgets.HBox([w_tpl_editor, btn_apply_tpl], layout=widgets.Layout(align_items='center'))
+        # --- FINAL RENDER ---
+        top_controls = widgets.VBox([
+            widgets.HTML("<b>Global Email Settings</b>"),
+            w_subject_tpl,
+            w_cc_global,
+            widgets.Label("Body Template:"),
+            widgets.HBox([w_body_tpl, btn_update_preview], layout=widgets.Layout(align_items='center'))
         ], layout=widgets.Layout(padding='15px', border='2px solid #0078d4', margin='0 0 20px 0', background_color='#eef6fb'))
 
-        list_panel = widgets.VBox(rows_container)
-        
-        display(top_panel)
-        display(list_panel)
+        display(top_controls)
+        display(widgets.VBox(rows_container))
