@@ -1,0 +1,18 @@
+{
+  "Q4|AVIDXCHANGE-TEST|Bob O'Brien": {
+    "last_mod": "2025-12-29T17:32:03Z",
+    "stats": {
+      "Appr": 3,
+      "Deny": 0,
+      "Chg": 0
+    }
+  },
+  "Q4|Visa|Alice Wonderland": {
+    "last_mod": "2026-01-02T20:07:08Z",
+    "stats": {
+      "Appr": 1,
+      "Deny": 0,
+      "Chg": 0
+    }
+  }
+}

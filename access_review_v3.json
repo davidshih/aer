@@ -102,64 +102,7 @@
    "cell_type": "code",
    "execution_count": null,
    "metadata": {},
-   "outputs": [
-    {
-     "name": "stderr",
-     "output_type": "stream",
-     "text": [
-      "2026-01-12 09:57:10,589 | INFO | ✅ SharePoint 連線成功 (Site ID: davidshih....)\n"
-     ]
-    },
-    {
-     "name": "stdout",
-     "output_type": "stream",
-     "text": [
-      "📂 正在讀取根目錄: 2025 Entitlement Review ...\n"
-     ]
-    },
-    {
-     "data": {
-      "application/vnd.jupyter.widget-view+json": {
-       "model_id": "4871ee80b1684e55bacce83717187381",
-       "version_major": 2,
-       "version_minor": 0
-      },
-      "text/plain": [
-       "VBox(children=(HTML(value='<h3>📂 App 選擇器 (請展開 Category 並勾選 App)</h3>'), HBox(children=(Button(button_style='in…"
-      ]
-     },
-     "metadata": {},
-     "output_type": "display_data"
-    },
-    {
-     "data": {
-      "application/vnd.jupyter.widget-view+json": {
-       "model_id": "b1d41240b5234af5a5e10a727cc4576a",
-       "version_major": 2,
-       "version_minor": 0
-      },
-      "text/plain": [
-       "Button(button_style='success', description='✅ 確認選擇', layout=Layout(margin='20px 0'), style=ButtonStyle())"
-      ]
-     },
-     "metadata": {},
-     "output_type": "display_data"
-    },
-    {
-     "data": {
-      "application/vnd.jupyter.widget-view+json": {
-       "model_id": "111a99d0be124bfeab0a1fd5aec756e5",
-       "version_major": 2,
-       "version_minor": 0
-      },
-      "text/plain": [
-       "Output()"
-      ]
-     },
-     "metadata": {},
-     "output_type": "display_data"
-    }
-   ],
+   "outputs": [],
    "source": [
     "# === Cell 2: SharePoint API & App Tree Selector (Combined) ===\n",
     "import ipywidgets as widgets\n",
@@ -312,7 +255,7 @@
   },
   {
    "cell_type": "code",
-   "execution_count": 6,
+   "execution_count": null,
    "metadata": {},
    "outputs": [],
    "source": [
@@ -363,67 +306,18 @@
   },
   {
    "cell_type": "code",
-   "execution_count": 7,
+   "execution_count": null,
    "metadata": {},
-   "outputs": [
-    {
-     "name": "stderr",
-     "output_type": "stream",
-     "text": [
-      "2026-01-12 09:57:21,752 | INFO | 🚀 Processing: AVIDXCHANGE-TEST | Users: 3\n",
-      "2026-01-12 09:57:23,554 | INFO |   ✅ Read: Bob O'Brien (Rows: 3, Missing: 0)\n",
-      "2026-01-12 09:57:26,261 | INFO |   ✅ Read: Jane Smith (Rows: 5, Missing: 1)\n",
-      "2026-01-12 09:57:27,898 | INFO |   ✅ Read: Joe Petti (Rows: 4, Missing: 2)\n",
-      "2026-01-12 09:57:28,263 | INFO | 🚀 Processing: Visa | Users: 3\n",
-      "2026-01-12 09:57:31,526 | INFO |   ✅ Read: Alice Wonderland (Rows: 5, Missing: 0)\n",
-      "2026-01-12 09:57:33,363 | INFO |   ✅ Read: Charlie Brown (Rows: 5, Missing: 2)\n",
-      "2026-01-12 09:57:35,039 | INFO |   ✅ Read: Joe Petti (Rows: 4, Missing: 2)\n",
-      "2026-01-12 09:57:35,041 | INFO | 💾 Cache updated.\n",
-      "2026-01-12 09:57:35,044 | INFO | \n",
-      "=== Processing Complete === Total Records: 26\n"
-     ]
-    },
-    {
-     "data": {
-      "text/html": [
-       "<h3>📂 報告已生成 (路徑: output/2026-01-12)</h3><ul><li><b>🌎 Big File:</b> <code>output/2026-01-12/ALL_Consolidated_095735.xlsx</code></li><li>AVIDXCHANGE-TEST: <code>output/2026-01-12/Q4_AVIDXCHANGE-TEST_095735.xlsx</code></li><li>Visa: <code>output/2026-01-12/Q4_Visa_095735.xlsx</code></li></ul>"
-      ],
-      "text/plain": [
-       "<IPython.core.display.HTML object>"
-      ]
-     },
-     "metadata": {},
-     "output_type": "display_data"
-    }
-   ],
+   "outputs": [],
    "source": [
-    "# === Cell 4: 資料處理 & 報告生成 (Local Cache Optimized) ===\n",
+    "# === Cell 4: 資料處理 & 報告生成 (Fetch Creation Date + Retry) ===\n",
     "import pandas as pd\n",
     "import re\n",
     "import time\n",
-    "import json\n",
     "import requests\n",
     "from openpyxl.utils import get_column_letter\n",
     "from openpyxl.styles import Alignment\n",
     "from IPython.display import display, HTML\n",
-    "\n",
-    "# --- Cache Configuration ---\n",
-    "CACHE_FILE = \"aer_cache.json\"\n",
-    "cache_updated = False\n",
-    "\n",
-    "def load_cache():\n",
-    "    if os.path.exists(CACHE_FILE):\n",
-    "        try:\n",
-    "            with open(CACHE_FILE, 'r', encoding='utf-8') as f:\n",
-    "                return json.load(f)\n",
-    "        except: return {}\n",
-    "    return {}\n",
-    "\n",
-    "def save_cache(cache_data):\n",
-    "    with open(CACHE_FILE, 'w', encoding='utf-8') as f:\n",
-    "        json.dump(cache_data, f, indent=2)\n",
-    "\n",
-    "local_cache = load_cache()\n",
     "\n",
     "# 1. Check Selection\n",
     "if 'TARGET_APPS' not in globals() or not TARGET_APPS:\n",
@@ -461,33 +355,11 @@
     "                        target_file = target_files[0]\n",
     "                    \n",
     "                    file_name = target_file[\"name\"]\n",
-    "                    remote_mod_time = target_file.get(\"lastModifiedDateTime\")\n",
     "                    \n",
-    "                    # --- CACHE CHECK ---\n",
-    "                    cache_key = f\"{category}|{current_app_name}|{reviewer_name}\"\n",
-    "                    \n",
-    "                    # If file matches cache (meaning it was previously completed and hasn't changed)\n",
-    "                    if local_cache.get(cache_key) == remote_mod_time:\n",
-    "                        logger.info(f\"  ⏭️ Skipped (Cached/Done): {reviewer_name}\")\n",
-    "                        # Inject synthetic 'done' record so they appear in Summary Report\n",
-    "                        all_responses.append({\n",
-    "                            \"Category\": category, \n",
-    "                            \"App_Name\": current_app_name,\n",
-    "                            \"reviewer\": reviewer_name,\n",
-    "                            \"response\": \"Cached - Completed\", \n",
-    "                            \"details\": \"Skipped check via cache\",\n",
-    "                            \"is_missing\": False, # Mark as Done\n",
-    "                            \"row_number\": 0, \"file_name\": file_name, \"folder_url\": folder_url,\n",
-    "                            \"Audit_History\": \"Cached\", \n",
-    "                            \"Last_Modified\": remote_mod_time,\n",
-    "                            \"Created_Date\": remote_mod_time \n",
-    "                        })\n",
-    "                        break # Exit retry loop, move to next reviewer\n",
-    "                    \n",
-    "                    # --- NEW: Fetch specific metadata for Creation Date ---\n",
+    "                    # --- NEW: Fetch specific metadata for Creation Date (Version 1) ---\n",
     "                    meta_url = f\"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/items/{target_file['id']}\"\n",
     "                    meta_resp = requests.get(meta_url, headers=headers)\n",
-    "                    created_date = meta_resp.json().get(\"createdDateTime\") if meta_resp.status_code == 200 else remote_mod_time\n",
+    "                    created_date = meta_resp.json().get(\"createdDateTime\") if meta_resp.status_code == 200 else target_file.get(\"lastModifiedDateTime\")\n",
     "\n",
     "                    # Get Audit Log\n",
     "                    audit_log = get_file_audit_log(site_id, target_file[\"id\"])\n",
@@ -497,26 +369,17 @@
     "                    \n",
     "                    rows = read_visible_rows(content, reviewer_name, file_name, folder_url)\n",
     "                    \n",
-    "                    # Check if User is FULLY DONE (No missing items)\n",
-    "                    missing_count = sum(1 for r in rows if r['is_missing'])\n",
-    "                    \n",
     "                    for row in rows:\n",
     "                        row.update({\n",
     "                            \"Category\": category, \n",
     "                            \"App_Name\": current_app_name,\n",
     "                            \"Audit_History\": audit_log, \n",
-    "                            \"Last_Modified\": remote_mod_time,\n",
-    "                            \"Created_Date\": created_date \n",
+    "                            \"Last_Modified\": target_file.get(\"lastModifiedDateTime\"),\n",
+    "                            \"Created_Date\": created_date # Store for Due Date calc\n",
     "                        })\n",
     "                    \n",
     "                    all_responses.extend(rows)\n",
-    "                    logger.info(f\"  ✅ Read: {reviewer_name} (Rows: {len(rows)}, Missing: {missing_count})\")\n",
-    "                    \n",
-    "                    # UPDATE CACHE if completely done\n",
-    "                    if missing_count == 0 and len(rows) > 0:\n",
-    "                        local_cache[cache_key] = remote_mod_time\n",
-    "                        cache_updated = True\n",
-    "                        \n",
+    "                    logger.info(f\"  ✅ Read: {reviewer_name} ({len(rows)})\")\n",
     "                    break # Exit retry loop on success\n",
     "\n",
     "                except Exception as e:\n",
@@ -531,11 +394,6 @@
     "                        })\n",
     "    except Exception as e:\n",
     "        logger.error(f\"❌ Critical App Error ({current_app_name}): {e}\")\n",
-    "\n",
-    "# Save Cache to disk if changes occurred\n",
-    "if cache_updated:\n",
-    "    save_cache(local_cache)\n",
-    "    logger.info(\"💾 Cache updated.\")\n",
     "\n",
     "# 3. Dataframe Construction\n",
     "df = pd.DataFrame(all_responses)\n",
