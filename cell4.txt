@@ -1,406 +1,214 @@
-# === Cell 4: 整合版 (Dashboard Highlight, Summary Report, Filename Fix) ===
+# === Cell 4: Smart Data Preparation (AD Enrichment + Dept Head Mapping) ===
 import pandas as pd
-import re, time, json, os, requests
+import io
+import requests
+import time
 import ipywidgets as widgets
-from datetime import datetime
-from openpyxl.utils import get_column_letter
-from IPython.display import display, HTML, clear_output
+from IPython.display import display, clear_output
 
-# ==========================================
-# PART 1: CONFIG & PERSISTENCE
-# ==========================================
-CACHE_FILE = "aer_cache.json"
-NOTES_FILE = "aer_manual_notes.json"
-cache_updated = False
-EXCLUDED_FOLDERS = ["forms", "_private", "user listings", "audit logs", "audit"]
+# --- 1. Global Cache & Config ---
+user_cache = {}  # Cache to reduce API calls
+dept_map_cache = {} # Stores Department -> Reviewer mapping
 
-def load_json(file_path):
-    if os.path.exists(file_path):
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f: return json.load(f)
-        except: return {}
-    return {}
+# --- 2. AD Helper Function ---
+def fetch_ad_info(email):
+    """
+    Returns: { 'status': 'Active'/'Inactive', 'dept': '...', 'manager': '...' }
+    """
+    email = str(email).strip()
+    if not email or email.lower() == 'nan': 
+        return {'status': 'Unknown', 'dept': 'N/A', 'manager': 'Manual Check'}
+    
+    if email in user_cache: return user_cache[email]
 
-def save_json(file_path, data):
-    with open(file_path, 'w', encoding='utf-8') as f: json.dump(data, f, indent=2, ensure_ascii=False)
-
-local_cache = load_json(CACHE_FILE)
-manual_data_store = load_json(NOTES_FILE)
-
-# 關鍵字判斷邏輯
-def get_row_stats(txt):
-    txt = str(txt).lower().strip() if txt else ""
-    kw_approve = ['approv', 'retain', 'keep', 'confirm', 'verif', 'yes', 'ok', 'maintain', 'continue', 'active', 'valid']
-    kw_deny    = ['denied', 'deny', 'remove', 'delete', 'revok', 'disabl', 'terminat', 'reject', 'cancel', 'no', 'inactiv']
-    kw_change  = ['change', 'modif', 'updat', 'correct', 'edit', 'adjust', 'alter']
-    return {
-        "is_appr": 1 if any(k in txt for k in kw_approve) else 0,
-        "is_deny": 1 if any(k in txt for k in kw_deny) else 0,
-        "is_chg":  1 if any(k in txt for k in kw_change) else 0
-    }
-
-# ==========================================
-# PART 2: SCANNING ENGINE
-# ==========================================
-if 'TARGET_APPS' not in globals() or not TARGET_APPS:
-    logger.warning("⚠️ 請先在 Cell 2 選擇 App！")
-    TARGET_APPS = []
-
-all_responses = []
-errors = []
-
-for category, current_app_name, current_path in TARGET_APPS:
+    # Get User Data
     try:
-        raw_folders = list_folders(site_id, current_path)
-        reviewers = []
-        for r in raw_folders:
-            r_name_lower = r['name'].lower()
-            if r_name_lower not in EXCLUDED_FOLDERS and "audit" not in r_name_lower and "listing" not in r_name_lower:
-                reviewers.append(r)
-        
-        logger.info(f"🚀 Processing: {current_app_name} | Users: {len(reviewers)}")
-        
-        for folder in reviewers:
-            reviewer_name = folder["name"]
-            folder_url = folder["webUrl"]
-            folder_path = f"{current_path}/{reviewer_name}"
-            
-            for attempt in range(2):
-                try:
-                    excel_files = list_excel_files(site_id, folder_path)
-                    target_files = []
-                    search_prefix = f"{current_app_name} User".lower()
-                    search_user = reviewer_name.lower()
-                    
-                    for f in excel_files:
-                        f_name = f["name"].lower()
-                        if f_name.startswith(search_prefix) and search_user in f_name:
-                            target_files.append(f)
-                    
-                    if not target_files:
-                        raise FileNotFoundError(f"No file matching format: '{current_app_name} User * {reviewer_name}.xlsx'")
-                    
-                    target_file = target_files[0]
-                    file_name = target_file["name"]
-                    remote_mod_time = target_file.get("lastModifiedDateTime")
-                    meta_created_time = target_file.get("createdDateTime")
-                    
-                    # --- CACHE CHECK ---
-                    is_hit = False
-                    cache_key = f"{category}|{current_app_name}|{reviewer_name}"
-                    
-                    if USE_CACHE:
-                        cached_entry = local_cache.get(cache_key)
-                        if isinstance(cached_entry, dict) and cached_entry.get('last_mod') == remote_mod_time:
-                            is_hit = True
-                            stats_snapshot = cached_entry.get('stats', {'Appr':0, 'Deny':0, 'Chg':0})
-                            audit_snapshot = cached_entry.get('audit', {'log':'Cached', 'creator':'Cached', 'modifier':'Cached', 'created_ts': None})
-                        
-                    if is_hit:
-                        logger.info(f"  ⏭️ Skipped (Cached): {reviewer_name}")
-                        final_created_date = audit_snapshot.get('created_ts') or meta_created_time
-                        all_responses.append({
-                            "Category": category, "App_Name": current_app_name,
-                            "reviewer": reviewer_name, "response": "Cached - Completed", 
-                            "details": "Cached", # Cache Mode 無法還原 User 填寫的詳細理由，僅顯示 Cached
-                            "is_missing": False, "row_number": 0, "file_name": file_name, "folder_url": folder_url,
-                            "Last_Modified": remote_mod_time,
-                            "File_Created_Date": final_created_date,
-                            "Audit_Log": audit_snapshot.get('log', ''), 
-                            "File_Creator": audit_snapshot.get('creator', ''), 
-                            "File_Modifier": audit_snapshot.get('modifier', ''),
-                            "stats_appr": stats_snapshot['Appr'],
-                            "stats_deny": stats_snapshot['Deny'],
-                            "stats_chg": stats_snapshot['Chg']
-                        })
-                        break 
-                    
-                    # --- DOWNLOAD & PARSE ---
-                    content = download_file(site_id, f"{folder_path}/{file_name}")
-                    rows = read_visible_rows(content, reviewer_name, file_name, folder_url)
-                    audit_info = get_file_audit_info(site_id, target_file["id"])
-                    final_created_date = audit_info.get('created_ts') or meta_created_time
-                    
-                    miss_cnt = 0
-                    s_appr, s_deny, s_chg = 0, 0, 0
-                    
-                    for r in rows:
-                        if r['is_missing']: miss_cnt += 1
-                        st = get_row_stats(r['response'])
-                        s_appr += st['is_appr']; s_deny += st['is_deny']; s_chg += st['is_chg']
-                        
-                        r.update({
-                            "Category": category, "App_Name": current_app_name,
-                            "Last_Modified": remote_mod_time,
-                            "File_Created_Date": final_created_date,
-                            "Audit_Log": audit_info['log'],
-                            "File_Creator": audit_info['creator'],
-                            "File_Modifier": audit_info['modifier'],
-                            "stats_appr": st['is_appr'], "stats_deny": st['is_deny'], "stats_chg": st['is_chg']
-                            # 'details' 已經在 read_visible_rows 裡讀取並存在 r 中
-                        })
-                    
-                    all_responses.extend(rows)
-                    logger.info(f"  ✅ Read: {reviewer_name} (Miss: {miss_cnt})")
-                    
-                    if miss_cnt == 0 and len(rows) > 0:
-                        local_cache[cache_key] = {
-                            "last_mod": remote_mod_time,
-                            "stats": {"Appr": s_appr, "Deny": s_deny, "Chg": s_chg},
-                            "audit": audit_info
-                        }
-                        cache_updated = True
-                    break 
+        url = f"https://graph.microsoft.com/v1.0/users/{email}?$select=id,accountEnabled,department,displayName"
+        resp = requests.get(url, headers=headers)
+        if resp.status_code == 404:
+            # Try searching by mail if UPN fails
+            url = f"https://graph.microsoft.com/v1.0/users?$filter=mail eq '{email}'&$select=id,accountEnabled,department,displayName"
+            resp = requests.get(url, headers=headers)
+            data = resp.json().get('value', [])
+            if not data:
+                return {'status': 'Not Found', 'dept': 'N/A', 'manager': 'Manual Check'}
+            user_data = data[0]
+        elif resp.status_code != 200:
+            return {'status': 'Error', 'dept': 'Error', 'manager': 'Manual Check'}
+        else:
+            user_data = resp.json()
 
-                except Exception as e:
-                    if attempt == 0: time.sleep(1)
-                    else:
-                        err_msg = str(e) if "No file matching" in str(e) else f"Error: {e}"
-                        logger.error(f"  ❌ Failed {reviewer_name}: {err_msg}")
-                        errors.append({
-                            "Category": category, "App_Name": current_app_name, 
-                            "reviewer": reviewer_name, "error": err_msg, "folder_url": folder_url
-                        })
+        # Parse User Info
+        status = "Active" if user_data.get('accountEnabled') else "Inactive"
+        dept = user_data.get('department') or "N/A"
+        user_id = user_data.get('id')
+
+        # Get Manager
+        mgr_name = "Manual Check"
+        if status != "Not Found":
+            url_mgr = f"https://graph.microsoft.com/v1.0/users/{user_id}/manager?$select=displayName,mail"
+            r_mgr = requests.get(url_mgr, headers=headers)
+            if r_mgr.status_code == 200:
+                mgr_name = r_mgr.json().get('displayName')
+            elif r_mgr.status_code == 404:
+                mgr_name = "No Manager"
+
+        res = {'status': status, 'dept': dept, 'manager': mgr_name}
+        user_cache[email] = res
+        return res
+
     except Exception as e:
-        logger.error(f"❌ App Error ({current_app_name}): {e}")
+        logger.error(f"AD Error ({email}): {e}")
+        return {'status': 'Error', 'dept': 'Error', 'manager': 'Manual Check'}
 
-if cache_updated:
-    save_json(CACHE_FILE, local_cache)
-    logger.info("💾 Cache updated safely.")
+# --- 3. UI Components ---
+style = {'description_width': 'initial'}
+up_main = widgets.FileUpload(accept='.xlsx, .csv', description='📂 1. Select Main List', layout=widgets.Layout(width='300px'))
+up_dept = widgets.FileUpload(accept='.csv, .xlsx', description='📂 2. Dept Head Map (Opt)', layout=widgets.Layout(width='300px'))
+out_log = widgets.Output(layout=widgets.Layout(border='1px solid #eee', padding='10px', height='300px', overflow_y='scroll'))
+btn_run = widgets.Button(description='🚀 Start Processing', button_style='primary', disabled=True)
+lbl_file_info = widgets.HTML("<i>Waiting for file...</i>")
 
-# ==========================================
-# PART 3: AGGREGATION & DASHBOARD
-# ==========================================
-df = pd.DataFrame(all_responses)
-today_str = datetime.now().strftime("%Y-%m-%d")
-output_dir = f"output/{today_str}"
-os.makedirs(output_dir, exist_ok=True)
+processed_df = None # Store result
 
-unified_data = {}
-def get_app_node(cat, app):
-    key = f"{cat} > {app}"
-    if key not in unified_data:
-        saved_app = manual_data_store.get(key, {})
-        unified_data[key] = {
-            "Category": cat, "App_Name": app, 
-            "status_manual": saved_app.get("app_status", "Calculated"), 
-            "note_manual": saved_app.get("app_note", ""), 
-            "reviewers": {}, "stats": {"total_users": 0, "completed_users": 0}
-        }
-    return unified_data[key]
+def check_file(change):
+    # Validate Main File on Upload
+    if not up_main.value: 
+        lbl_file_info.value = "<i>Waiting for file...</i>"
+        btn_run.disabled = True
+        return
 
-# --- Aggregation Logic ---
-if not df.empty:
-    stats = df.groupby(["Category", "App_Name", "reviewer"]).agg(
-        missing=("is_missing", "sum"),
-        approved=("stats_appr", "sum"),
-        denied=("stats_deny", "sum"),
-        changed=("stats_chg", "sum"),
-        f_creator=("File_Creator", "first"),
-        f_modifier=("File_Modifier", "first"),
-        audit=("Audit_Log", "first")
-    ).reset_index()
-
-    for _, row in stats.iterrows():
-        node = get_app_node(row['Category'], row['App_Name'])
-        rev_key = row['reviewer']
-        is_done = (row['missing'] == 0)
-        node['stats']['total_users'] += 1
-        if is_done: node['stats']['completed_users'] += 1
-        
-        saved_rev = manual_data_store.get(f"{node['Category']} > {node['App_Name']}", {}).get("reviewers", {}).get(rev_key, {})
-        status_calc = "✅ Completed" if is_done else f"❌ Pending: {row['missing']}"
-        
-        # ★ Improvement #4: Dashboard Highlight Logic (HTML)
-        d_val = int(row['denied'])
-        c_val = int(row['changed'])
-        d_style = "color:red; font-weight:bold" if d_val > 0 else "color:#555"
-        c_style = "color:darkorange; font-weight:bold" if c_val > 0 else "color:#555"
-        
-        detail_html = f"Appr:{int(row['approved'])} | <span style='{d_style}'>Deny:{d_val}</span> | <span style='{c_style}'>Chg:{c_val}</span>"
-        
-        node['reviewers'][rev_key] = {
-            "status_calc": status_calc, 
-            "detail_html": detail_html, # Store HTML version for display
-            "missing_cnt": row['missing'],
-            "stats": {"Appr": row['approved'], "Deny": row['denied'], "Chg": row['changed']},
-            "audit_info": {"creator": row['f_creator'], "modifier": row['f_modifier'], "log": row['audit']},
-            "override": saved_rev.get("override", "-"), "note": saved_rev.get("note", ""),
-            "error_msg": "", "folder_url": df[(df['App_Name'] == row['App_Name']) & (df['reviewer'] == rev_key)].iloc[0].get('folder_url', '#')
-        }
-
-# Process Errors
-for err in errors:
-    node = get_app_node(err['Category'], err['App_Name'])
-    rev_key = err['reviewer']
-    node['stats']['total_users'] += 1
-    saved_rev = manual_data_store.get(f"{node['Category']} > {node['App_Name']}", {}).get("reviewers", {}).get(rev_key, {})
-    if rev_key in node['reviewers']:
-        node['reviewers'][rev_key]['error_msg'] += f"; {err['error']}"
-        node['reviewers'][rev_key]['status_calc'] = "⚠️ Partial Error"
-    else:
-        node['reviewers'][rev_key] = {
-            "status_calc": "⛔ Failed to Read",
-            "detail_html": f"<span style='color:red'>{err['error']}</span>",
-            "missing_cnt": -1, "stats": {"Appr": 0, "Deny": 0, "Chg": 0},
-            "audit_info": {"creator": "Error", "modifier": "Error", "log": ""},
-            "override": saved_rev.get("override", "-"), "note": saved_rev.get("note", ""),
-            "error_msg": err['error'], "folder_url": err.get('folder_url', '#')
-        }
-
-# ==========================================
-# PART 4: DASHBOARD UI & EXPORT LOGIC
-# ==========================================
-widget_store = {} 
-
-def build_dashboard():
-    container = widgets.VBox(layout=widgets.Layout(width='100%'))
-    btn_export = widgets.Button(description="💾 Save All Reports", button_style='success', icon='file-excel', layout=widgets.Layout(width='250px'))
-    lbl_out = widgets.Label(value="")
+    f = up_main.value[0]
+    fname = f['name']
+    content = f['content']
     
-    app_widgets = []
+    try:
+        if fname.endswith('.csv'): df = pd.read_csv(io.BytesIO(content))
+        else: df = pd.read_excel(io.BytesIO(content))
+        
+        rows = len(df)
+        cols = df.columns.tolist()
+        
+        # Check First Two Columns (Soft Check)
+        col1_ok = "name" in cols[0].lower() or "user" in cols[0].lower()
+        col2_ok = "email" in cols[1].lower() or "mail" in cols[1].lower()
+        
+        status_icon = "✅" if (col1_ok and col2_ok) else "⚠️"
+        status_text = "Format Looks Good" if (col1_ok and col2_ok) else "Check Columns 1 & 2"
+        
+        info = f"""
+        <b>Selected File:</b> {fname}<br>
+        <b>Records:</b> {rows}<br>
+        <b>Columns:</b> {cols[:2]}...<br>
+        <b>Status:</b> {status_icon} {status_text}
+        """
+        lbl_file_info.value = info
+        btn_run.disabled = False
+        
+    except Exception as e:
+        lbl_file_info.value = f"❌ Error reading file: {e}"
+        btn_run.disabled = True
+
+up_main.observe(check_file, names='value')
+
+def process_data(b):
+    out_log.clear_output()
+    btn_run.disabled = True
+    btn_run.description = "Processing..."
     
-    for app_key in sorted(unified_data.keys()):
-        app_data = unified_data[app_key]
-        comp = app_data['stats']['completed_users']
-        tot = app_data['stats']['total_users']
-        pct = int((comp / tot * 100)) if tot > 0 else 0
-        header_color = "#e6ffe6" if comp == tot and tot > 0 else "#fff3e6"
-        
-        w_lbl = widgets.HTML(f"<b>📂 {app_key}</b> &nbsp;&nbsp; <span style='background:white; border:1px solid #ccc; padding:2px 6px; border-radius:4px; font-size:11px'>✅ {comp}/{tot} ({pct}%)</span>", layout=widgets.Layout(width='350px'))
-        w_status = widgets.Dropdown(options=["Calculated", "Force Completed", "N/A", "Action Required"], value=app_data['status_manual'], layout=widgets.Layout(width='150px'))
-        w_note = widgets.Text(value=app_data['note_manual'], placeholder="App Note...", layout=widgets.Layout(width='200px'))
-        
-        widget_store[app_key] = {"data": app_data, "w_stat": w_status, "w_note": w_note, "revs": {}}
-        
-        rev_rows = [widgets.HBox([
-            widgets.HTML("<b>Reviewer</b>", layout=widgets.Layout(width='180px')),
-            widgets.HTML("<b>Status</b>", layout=widgets.Layout(width='140px')),
-            widgets.HTML("<b>Breakdown / Error</b>", layout=widgets.Layout(width='250px')),
-            widgets.HTML("<b>Override</b>", layout=widgets.Layout(width='120px')),
-            widgets.HTML("<b>Note</b>", layout=widgets.Layout(width='180px'))
-        ])]
-        
-        for r_name, r_d in app_data['reviewers'].items():
-            color = "#333"; bg = "white"
-            if "Failed" in r_d['status_calc']: color = "red"; bg="#fff0f0"
-            elif "Pending" in r_d['status_calc']: color = "darkorange"
-            elif "Completed" in r_d['status_calc']: color = "green"
-            
-            w_r_name = widgets.HTML(f"<a href='{r_d['folder_url']}' target='_blank' style='color:{color}; text-decoration:none'>{r_name}</a>", layout=widgets.Layout(width='180px'))
-            w_r_st = widgets.HTML(f"<span style='color:{color}'>{r_d['status_calc']}</span>", layout=widgets.Layout(width='140px'))
-            w_r_det = widgets.HTML(f"<span style='font-size:11px'>{r_d['detail_html']}</span>", layout=widgets.Layout(width='250px'))
-            w_ovr = widgets.Dropdown(options=["-", "Mark Done", "Extension", "Escalated"], value=r_d['override'], layout=widgets.Layout(width='120px'))
-            w_rn = widgets.Text(value=r_d['note'], placeholder="...", layout=widgets.Layout(width='180px'))
-            
-            widget_store[app_key]['revs'][r_name] = {"w_ovr": w_ovr, "w_note": w_rn, "sys": r_d}
-            rev_rows.append(widgets.HBox([w_r_name, w_r_st, w_r_det, w_ovr, w_rn], layout=widgets.Layout(background_color=bg, border='1px solid #f4f4f4')))
-            
-        app_head = widgets.HBox([w_lbl, w_status, w_note], layout=widgets.Layout(background_color=header_color, padding="8px", border="1px solid #ccc"))
-        app_body = widgets.VBox(rev_rows, layout=widgets.Layout(padding="5px 0 10px 20px"))
-        app_widgets.append(widgets.VBox([app_head, app_body], layout=widgets.Layout(margin="10px 0")))
+    global processed_df, dept_map_cache
+    
+    with out_log:
+        # 1. Load Dept Map if exists
+        if up_dept.value:
+            print("📥 Loading Department Head Mapping...")
+            f_d = up_dept.value[0]
+            try:
+                if f_d['name'].endswith('.csv'): df_map = pd.read_csv(io.BytesIO(f_d['content']))
+                else: df_map = pd.read_excel(io.BytesIO(f_d['content']))
+                # Assume Col 1 = Dept, Col 2 = Reviewer
+                for _, row in df_map.iterrows():
+                    d_key = str(row[0]).strip().lower()
+                    d_val = str(row[1]).strip()
+                    dept_map_cache[d_key] = d_val
+                print(f"   ✅ Loaded {len(dept_map_cache)} department rules.")
+            except Exception as e:
+                print(f"   ❌ Failed to load Dept Map: {e}")
 
-    def export(b):
-        b.disabled=True; b.description="Saving..."
-        ts = datetime.now().strftime("%Y%m%d")
-        persist_store = load_json(NOTES_FILE)
-        saved_files = []
-        summary_rows = [] # For Status_Summary.xlsx
+        # 2. Load Main File
+        f_m = up_main.value[0]
+        if f_m['name'].endswith('.csv'): df = pd.read_csv(io.BytesIO(f_m['content']))
+        else: df = pd.read_excel(io.BytesIO(f_m['content']))
         
-        # 1. Update Persistence Store
-        for k, v in widget_store.items():
-            app_s = v['w_stat'].value; app_n = v['w_note'].value
-            persist_store[k] = {"app_status": app_s, "app_note": app_n, "reviewers": {}}
-            for rk, rv in v['revs'].items():
-                persist_store[k]["reviewers"][rk] = {"override": rv['w_ovr'].value, "note": rv['w_note'].value}
-        save_json(NOTES_FILE, persist_store)
+        # Identify Columns (Strict based on prompt: 1=Name, 2=Email)
+        col_name = df.columns[0]
+        col_email = df.columns[1]
         
-        # 2. Generate Individual App Reports
-        for app_key, widget_data in widget_store.items():
-            app_name = widget_data['data']['App_Name']
-            category = widget_data['data']['Category']
-            app_errors = [e for e in errors if e['App_Name'] == app_name]
-            suffix = "_Incomplete" if app_errors else ""
-            
-            if df.empty: app_rows = []
-            else: app_rows = df[(df['Category'] == category) & (df['App_Name'] == app_name)].to_dict('records')
-            
-            if not app_rows and app_errors:
-                 app_rows = [{"reviewer": e['reviewer'], "details": f"Error: {e['error']}", "response": "Error"} for e in app_errors]
-
-            final_data = []
-            for row in app_rows:
-                rev_name = row.get('reviewer')
-                dash_rev = widget_data['revs'].get(rev_name, {})
-                
-                # Logic for Summary Report Row
-                if dash_rev and rev_name: 
-                    # We check if we already added this reviewer for this app to summary (to avoid duplicates if multiple rows)
-                    # Simple way: just add one summary row per reviewer per app
-                    pass 
-                
-                sys_status = dash_rev.get('sys', {}).get('status_calc', 'Unknown')
-                ovr = dash_rev.get('w_ovr', widgets.Dropdown()).value if dash_rev else "-"
-                final_status = widget_data['w_stat'].value if widget_data['w_stat'].value != "Calculated" else (ovr if ovr != "-" else sys_status)
-                
-                # ★ Feedback 1: Ensure 'details' (Column E) is captured
-                details_val = row.get('details') 
-                if details_val is None: details_val = ""
-                
-                final_data.append({
-                    "Reviewer": rev_name,
-                    "File Name": row.get('file_name', ''),
-                    "Row Num": row.get('row_number', ''),
-                    "Reviewer Response": row.get('response', ''), 
-                    "Details of Access Change": details_val, # ★ Correctly mapped
-                    "Final Status": final_status,
-                    "Manual Override": ovr,
-                    "Admin Note": dash_rev.get('w_note', widgets.Text()).value if dash_rev else "",
-                    "File Created": row.get('File_Created_Date', ''),
-                    "Last Modified": row.get('Last_Modified', ''),
-                    "Full Audit Log": row.get('Audit_Log', '')
-                })
-            
-            # Add to Summary (One row per Reviewer, not per file row)
-            for r_name, r_d in widget_data['revs'].items():
-                sys_st = r_d['sys'].get('status_calc', 'Unknown')
-                ovr_v = r_d['w_ovr'].value
-                fin_st = widget_data['w_stat'].value if widget_data['w_stat'].value != "Calculated" else (ovr_v if ovr_v != "-" else sys_st)
-                
-                summary_rows.append({
-                    "Category": category, "App Name": app_name, "Reviewer": r_name,
-                    "System Status": sys_st, "Override": ovr_v, "Final Status": fin_st,
-                    "Missing Items": r_d['sys'].get('missing_cnt', 0),
-                    "Appr": r_d['sys']['stats'].get('Appr', 0),
-                    "Deny": r_d['sys']['stats'].get('Deny', 0),
-                    "Chg": r_d['sys']['stats'].get('Chg', 0),
-                    "App Note": widget_data['w_note'].value, "Rev Note": r_d['w_note'].value
-                })
-
-            if final_data:
-                # ★ Feedback 2: Filename with Parent Folder & Date
-                safe_name = re.sub(r'[\\/*?:"<>|]', "", app_name)
-                safe_cat = re.sub(r'[\\/*?:"<>|]', "", category)
-                f_name = f"{output_dir}/{safe_cat}_{safe_name}_{ts}{suffix}.xlsx"
-                pd.DataFrame(final_data).to_excel(f_name, index=False)
-                saved_files.append(f"<a href='{f_name}' target='_blank'>{safe_cat}/{safe_name}</a>")
+        print(f"🚀 Processing {len(df)} records...")
         
-        # ★ Feedback 3: Generate Status_Summary.xlsx
-        if summary_rows:
-            sum_file = f"{output_dir}/Status_Summary_{ts}.xlsx"
-            pd.DataFrame(summary_rows).to_excel(sum_file, index=False)
-            saved_files.insert(0, f"<b><a href='{sum_file}' target='_blank'>[Status Summary]</a></b>")
+        new_data = []
+        
+        # 3. Iterate & Enrich
+        prog = widgets.IntProgress(min=0, max=len(df), description='Enriching:')
+        display(prog)
+        
+        for idx, row in df.iterrows():
+            u_name = row[col_name]
+            u_email = row[col_email]
+            
+            # AD Lookup
+            ad = fetch_ad_info(u_email)
+            
+            # Logic: Determine Reviewer
+            # Priority: Dept Map > AD Manager > "Manual Check"
+            dept_key = str(ad['dept']).strip().lower()
+            
+            final_reviewer = ad['manager']
+            source = "AD"
+            
+            if dept_key in dept_map_cache:
+                final_reviewer = dept_map_cache[dept_key]
+                source = "Map"
+            
+            new_data.append({
+                "User": u_name,
+                "User Email": u_email,
+                "User Department": ad['dept'],
+                "User Status": ad['status'],
+                "Reviewer": final_reviewer,
+                "Reviewer's Response": "", # Blank
+                "Details of Access change": "" # Blank
+            })
+            
+            if idx % 10 == 0: prog.value = idx
+            
+        prog.value = len(df)
+        
+        # 4. Finalize
+        processed_df = pd.DataFrame(new_data)
+        out_name = f"output/Enriched_Review_List_{int(time.time())}.xlsx"
+        processed_df.to_excel(out_name, index=False)
+        
+        print("\n✅ Done!")
+        print(f"💾 Saved to: {out_name}")
+        display(processed_df.head(5))
+        
+        btn_run.description = "✅ Start Processing"
+        btn_run.disabled = False
 
-        lbl_out.value = f"Saved {len(saved_files)} files."
-        display(HTML("✅ Saved: " + " | ".join(saved_files)))
-        b.disabled=False; b.description="💾 Save All Reports"
+btn_run.on_click(process_data)
 
-    btn_export.on_click(export)
-    display(widgets.HBox([btn_export, lbl_out]))
-    container.children = tuple(app_widgets)
-    display(container)
-
-if unified_data:
-    build_dashboard()
-else:
-    display(HTML("<b>⚠️ No data found.</b>"))
+# Layout
+ui = widgets.VBox([
+    widgets.HTML("<h3>🛠️ Step 1: Input Data & Enrichment</h3>"),
+    widgets.HBox([
+        widgets.VBox([widgets.Label("1. Main User List (User, Email)"), up_main]),
+        widgets.VBox([widgets.Label("2. Dept Mapping (Dept, Head) [Optional]"), up_dept])
+    ]),
+    widgets.HTML("<hr>"),
+    lbl_file_info,
+    btn_run,
+    widgets.HTML("<hr>"),
+    out_log
+])
+display(ui)
