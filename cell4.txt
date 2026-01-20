@@ -1,14 +1,9 @@
-# === Cell 4: 整合版 - 智慧快取、錯誤追蹤與詳細統計儀表板 (Safe Cache Update) ===
+# === Cell 4: 整合版 (Dashboard Highlight, Summary Report, Filename Fix) ===
 import pandas as pd
-import re
-import time
-import json
-import os
-import requests
+import re, time, json, os, requests
 import ipywidgets as widgets
 from datetime import datetime
 from openpyxl.utils import get_column_letter
-from openpyxl.styles import Alignment
 from IPython.display import display, HTML, clear_output
 
 # ==========================================
@@ -17,30 +12,31 @@ from IPython.display import display, HTML, clear_output
 CACHE_FILE = "aer_cache.json"
 NOTES_FILE = "aer_manual_notes.json"
 cache_updated = False
+EXCLUDED_FOLDERS = ["forms", "_private", "user listings", "audit logs", "audit"]
 
 def load_json(file_path):
     if os.path.exists(file_path):
         try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
+            with open(file_path, 'r', encoding='utf-8') as f: return json.load(f)
         except: return {}
     return {}
 
 def save_json(file_path, data):
-    with open(file_path, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    with open(file_path, 'w', encoding='utf-8') as f: json.dump(data, f, indent=2, ensure_ascii=False)
 
-# Load existing data first (Preserves data for apps not being scanned today)
 local_cache = load_json(CACHE_FILE)
 manual_data_store = load_json(NOTES_FILE)
 
-# Helper to check response types
+# 關鍵字判斷邏輯
 def get_row_stats(txt):
     txt = str(txt).lower().strip() if txt else ""
+    kw_approve = ['approv', 'retain', 'keep', 'confirm', 'verif', 'yes', 'ok', 'maintain', 'continue', 'active', 'valid']
+    kw_deny    = ['denied', 'deny', 'remove', 'delete', 'revok', 'disabl', 'terminat', 'reject', 'cancel', 'no', 'inactiv']
+    kw_change  = ['change', 'modif', 'updat', 'correct', 'edit', 'adjust', 'alter']
     return {
-        "is_appr": 1 if any(k in txt for k in ['approv', 'retain', 'keep']) else 0,
-        "is_deny": 1 if any(k in txt for k in ['denied', 'remove', 'delete']) else 0,
-        "is_chg":  1 if any(k in txt for k in ['change', 'modif']) else 0
+        "is_appr": 1 if any(k in txt for k in kw_approve) else 0,
+        "is_deny": 1 if any(k in txt for k in kw_deny) else 0,
+        "is_chg":  1 if any(k in txt for k in kw_change) else 0
     }
 
 # ==========================================
@@ -53,11 +49,14 @@ if 'TARGET_APPS' not in globals() or not TARGET_APPS:
 all_responses = []
 errors = []
 
-# --- Processing Loop ---
 for category, current_app_name, current_path in TARGET_APPS:
     try:
-        reviewers = list_folders(site_id, current_path)
-        reviewers = [r for r in reviewers if r['name'] not in ["Forms", "_private"] and "audit" not in r['name'].lower()]
+        raw_folders = list_folders(site_id, current_path)
+        reviewers = []
+        for r in raw_folders:
+            r_name_lower = r['name'].lower()
+            if r_name_lower not in EXCLUDED_FOLDERS and "audit" not in r_name_lower and "listing" not in r_name_lower:
+                reviewers.append(r)
         
         logger.info(f"🚀 Processing: {current_app_name} | Users: {len(reviewers)}")
         
@@ -69,37 +68,47 @@ for category, current_app_name, current_path in TARGET_APPS:
             for attempt in range(2):
                 try:
                     excel_files = list_excel_files(site_id, folder_path)
-                    target_files = [f for f in excel_files if reviewer_name.lower() in f["name"].lower()]
+                    target_files = []
+                    search_prefix = f"{current_app_name} User".lower()
+                    search_user = reviewer_name.lower()
+                    
+                    for f in excel_files:
+                        f_name = f["name"].lower()
+                        if f_name.startswith(search_prefix) and search_user in f_name:
+                            target_files.append(f)
                     
                     if not target_files:
-                        valid_excels = [f for f in excel_files if not f["name"].startswith("~$")]
-                        if not valid_excels: 
-                            raise FileNotFoundError("No Excel file found")
-                        target_file = valid_excels[0]
-                    else:
-                        target_file = target_files[0]
+                        raise FileNotFoundError(f"No file matching format: '{current_app_name} User * {reviewer_name}.xlsx'")
                     
+                    target_file = target_files[0]
                     file_name = target_file["name"]
                     remote_mod_time = target_file.get("lastModifiedDateTime")
+                    meta_created_time = target_file.get("createdDateTime")
                     
                     # --- CACHE CHECK ---
-                    cache_key = f"{category}|{current_app_name}|{reviewer_name}"
-                    cached_entry = local_cache.get(cache_key)
-                    
                     is_hit = False
-                    if isinstance(cached_entry, dict) and cached_entry.get('last_mod') == remote_mod_time:
-                        is_hit = True
-                        stats_snapshot = cached_entry.get('stats', {'Appr':0, 'Deny':0, 'Chg':0})
-                    elif isinstance(cached_entry, str) and cached_entry == remote_mod_time:
-                        is_hit = False # Force update for old format
+                    cache_key = f"{category}|{current_app_name}|{reviewer_name}"
+                    
+                    if USE_CACHE:
+                        cached_entry = local_cache.get(cache_key)
+                        if isinstance(cached_entry, dict) and cached_entry.get('last_mod') == remote_mod_time:
+                            is_hit = True
+                            stats_snapshot = cached_entry.get('stats', {'Appr':0, 'Deny':0, 'Chg':0})
+                            audit_snapshot = cached_entry.get('audit', {'log':'Cached', 'creator':'Cached', 'modifier':'Cached', 'created_ts': None})
                         
                     if is_hit:
                         logger.info(f"  ⏭️ Skipped (Cached): {reviewer_name}")
+                        final_created_date = audit_snapshot.get('created_ts') or meta_created_time
                         all_responses.append({
                             "Category": category, "App_Name": current_app_name,
                             "reviewer": reviewer_name, "response": "Cached - Completed", 
+                            "details": "Cached", # Cache Mode 無法還原 User 填寫的詳細理由，僅顯示 Cached
                             "is_missing": False, "row_number": 0, "file_name": file_name, "folder_url": folder_url,
-                            "Audit_History": "Cached", "Last_Modified": remote_mod_time,
+                            "Last_Modified": remote_mod_time,
+                            "File_Created_Date": final_created_date,
+                            "Audit_Log": audit_snapshot.get('log', ''), 
+                            "File_Creator": audit_snapshot.get('creator', ''), 
+                            "File_Modifier": audit_snapshot.get('modifier', ''),
                             "stats_appr": stats_snapshot['Appr'],
                             "stats_deny": stats_snapshot['Deny'],
                             "stats_chg": stats_snapshot['Chg']
@@ -109,29 +118,36 @@ for category, current_app_name, current_path in TARGET_APPS:
                     # --- DOWNLOAD & PARSE ---
                     content = download_file(site_id, f"{folder_path}/{file_name}")
                     rows = read_visible_rows(content, reviewer_name, file_name, folder_url)
+                    audit_info = get_file_audit_info(site_id, target_file["id"])
+                    final_created_date = audit_info.get('created_ts') or meta_created_time
                     
-                    # Calculate Stats
                     miss_cnt = 0
                     s_appr, s_deny, s_chg = 0, 0, 0
+                    
                     for r in rows:
                         if r['is_missing']: miss_cnt += 1
                         st = get_row_stats(r['response'])
                         s_appr += st['is_appr']; s_deny += st['is_deny']; s_chg += st['is_chg']
+                        
                         r.update({
                             "Category": category, "App_Name": current_app_name,
-                            "Audit_History": get_file_audit_log(site_id, target_file["id"]), 
                             "Last_Modified": remote_mod_time,
+                            "File_Created_Date": final_created_date,
+                            "Audit_Log": audit_info['log'],
+                            "File_Creator": audit_info['creator'],
+                            "File_Modifier": audit_info['modifier'],
                             "stats_appr": st['is_appr'], "stats_deny": st['is_deny'], "stats_chg": st['is_chg']
+                            # 'details' 已經在 read_visible_rows 裡讀取並存在 r 中
                         })
                     
                     all_responses.extend(rows)
                     logger.info(f"  ✅ Read: {reviewer_name} (Miss: {miss_cnt})")
                     
-                    # Update Cache in memory (only for current app)
                     if miss_cnt == 0 and len(rows) > 0:
                         local_cache[cache_key] = {
                             "last_mod": remote_mod_time,
-                            "stats": {"Appr": s_appr, "Deny": s_deny, "Chg": s_chg}
+                            "stats": {"Appr": s_appr, "Deny": s_deny, "Chg": s_chg},
+                            "audit": audit_info
                         }
                         cache_updated = True
                     break 
@@ -139,21 +155,21 @@ for category, current_app_name, current_path in TARGET_APPS:
                 except Exception as e:
                     if attempt == 0: time.sleep(1)
                     else:
-                        logger.error(f"  ❌ Failed {reviewer_name}: {e}")
+                        err_msg = str(e) if "No file matching" in str(e) else f"Error: {e}"
+                        logger.error(f"  ❌ Failed {reviewer_name}: {err_msg}")
                         errors.append({
                             "Category": category, "App_Name": current_app_name, 
-                            "reviewer": reviewer_name, "error": str(e), "folder_url": folder_url
+                            "reviewer": reviewer_name, "error": err_msg, "folder_url": folder_url
                         })
     except Exception as e:
         logger.error(f"❌ App Error ({current_app_name}): {e}")
 
 if cache_updated:
-    # Safely save the full cache (including apps not scanned today)
     save_json(CACHE_FILE, local_cache)
     logger.info("💾 Cache updated safely.")
 
 # ==========================================
-# PART 3: AGGREGATION
+# PART 3: AGGREGATION & DASHBOARD
 # ==========================================
 df = pd.DataFrame(all_responses)
 today_str = datetime.now().strftime("%Y-%m-%d")
@@ -161,11 +177,9 @@ output_dir = f"output/{today_str}"
 os.makedirs(output_dir, exist_ok=True)
 
 unified_data = {}
-
 def get_app_node(cat, app):
     key = f"{cat} > {app}"
     if key not in unified_data:
-        # Load from persisted store
         saved_app = manual_data_store.get(key, {})
         unified_data[key] = {
             "Category": cat, "App_Name": app, 
@@ -175,32 +189,42 @@ def get_app_node(cat, app):
         }
     return unified_data[key]
 
-# Process Success
+# --- Aggregation Logic ---
 if not df.empty:
     stats = df.groupby(["Category", "App_Name", "reviewer"]).agg(
         missing=("is_missing", "sum"),
         approved=("stats_appr", "sum"),
         denied=("stats_deny", "sum"),
-        changed=("stats_chg", "sum")
+        changed=("stats_chg", "sum"),
+        f_creator=("File_Creator", "first"),
+        f_modifier=("File_Modifier", "first"),
+        audit=("Audit_Log", "first")
     ).reset_index()
 
     for _, row in stats.iterrows():
         node = get_app_node(row['Category'], row['App_Name'])
         rev_key = row['reviewer']
-        
         is_done = (row['missing'] == 0)
         node['stats']['total_users'] += 1
         if is_done: node['stats']['completed_users'] += 1
         
         saved_rev = manual_data_store.get(f"{node['Category']} > {node['App_Name']}", {}).get("reviewers", {}).get(rev_key, {})
-        
         status_calc = "✅ Completed" if is_done else f"❌ Pending: {row['missing']}"
-        detail_str = f"Appr:{int(row['approved'])} | Deny:{int(row['denied'])} | Chg:{int(row['changed'])}"
+        
+        # ★ Improvement #4: Dashboard Highlight Logic (HTML)
+        d_val = int(row['denied'])
+        c_val = int(row['changed'])
+        d_style = "color:red; font-weight:bold" if d_val > 0 else "color:#555"
+        c_style = "color:darkorange; font-weight:bold" if c_val > 0 else "color:#555"
+        
+        detail_html = f"Appr:{int(row['approved'])} | <span style='{d_style}'>Deny:{d_val}</span> | <span style='{c_style}'>Chg:{c_val}</span>"
         
         node['reviewers'][rev_key] = {
-            "status_calc": status_calc, "detail_str": detail_str,
+            "status_calc": status_calc, 
+            "detail_html": detail_html, # Store HTML version for display
             "missing_cnt": row['missing'],
             "stats": {"Appr": row['approved'], "Deny": row['denied'], "Chg": row['changed']},
+            "audit_info": {"creator": row['f_creator'], "modifier": row['f_modifier'], "log": row['audit']},
             "override": saved_rev.get("override", "-"), "note": saved_rev.get("note", ""),
             "error_msg": "", "folder_url": df[(df['App_Name'] == row['App_Name']) & (df['reviewer'] == rev_key)].iloc[0].get('folder_url', '#')
         }
@@ -210,29 +234,28 @@ for err in errors:
     node = get_app_node(err['Category'], err['App_Name'])
     rev_key = err['reviewer']
     node['stats']['total_users'] += 1
-    
     saved_rev = manual_data_store.get(f"{node['Category']} > {node['App_Name']}", {}).get("reviewers", {}).get(rev_key, {})
-    
     if rev_key in node['reviewers']:
         node['reviewers'][rev_key]['error_msg'] += f"; {err['error']}"
         node['reviewers'][rev_key]['status_calc'] = "⚠️ Partial Error"
     else:
         node['reviewers'][rev_key] = {
             "status_calc": "⛔ Failed to Read",
-            "detail_str": f"<span style='color:red'>{err['error']}</span>",
+            "detail_html": f"<span style='color:red'>{err['error']}</span>",
             "missing_cnt": -1, "stats": {"Appr": 0, "Deny": 0, "Chg": 0},
+            "audit_info": {"creator": "Error", "modifier": "Error", "log": ""},
             "override": saved_rev.get("override", "-"), "note": saved_rev.get("note", ""),
             "error_msg": err['error'], "folder_url": err.get('folder_url', '#')
         }
 
 # ==========================================
-# PART 4: DASHBOARD UI
+# PART 4: DASHBOARD UI & EXPORT LOGIC
 # ==========================================
 widget_store = {} 
 
 def build_dashboard():
     container = widgets.VBox(layout=widgets.Layout(width='100%'))
-    btn_export = widgets.Button(description="💾 Save Final Report", button_style='success', icon='file-excel', layout=widgets.Layout(width='200px'))
+    btn_export = widgets.Button(description="💾 Save All Reports", button_style='success', icon='file-excel', layout=widgets.Layout(width='250px'))
     lbl_out = widgets.Label(value="")
     
     app_widgets = []
@@ -266,7 +289,7 @@ def build_dashboard():
             
             w_r_name = widgets.HTML(f"<a href='{r_d['folder_url']}' target='_blank' style='color:{color}; text-decoration:none'>{r_name}</a>", layout=widgets.Layout(width='180px'))
             w_r_st = widgets.HTML(f"<span style='color:{color}'>{r_d['status_calc']}</span>", layout=widgets.Layout(width='140px'))
-            w_r_det = widgets.HTML(f"<span style='font-size:11px'>{r_d['detail_str']}</span>", layout=widgets.Layout(width='250px'))
+            w_r_det = widgets.HTML(f"<span style='font-size:11px'>{r_d['detail_html']}</span>", layout=widgets.Layout(width='250px'))
             w_ovr = widgets.Dropdown(options=["-", "Mark Done", "Extension", "Escalated"], value=r_d['override'], layout=widgets.Layout(width='120px'))
             w_rn = widgets.Text(value=r_d['note'], placeholder="...", layout=widgets.Layout(width='180px'))
             
@@ -277,46 +300,100 @@ def build_dashboard():
         app_body = widgets.VBox(rev_rows, layout=widgets.Layout(padding="5px 0 10px 20px"))
         app_widgets.append(widgets.VBox([app_head, app_body], layout=widgets.Layout(margin="10px 0")))
 
-    # --- SAVE LOGIC (PRESERVES DATA) ---
     def export(b):
         b.disabled=True; b.description="Saving..."
-        data_rows = []
-        ts = datetime.now().strftime("%H%M%S")
-        
-        # 1. LOAD existing data (CRITICAL step to preserve off-screen apps)
+        ts = datetime.now().strftime("%Y%m%d")
         persist_store = load_json(NOTES_FILE)
+        saved_files = []
+        summary_rows = [] # For Status_Summary.xlsx
         
-        # 2. UPDATE with current screen data
+        # 1. Update Persistence Store
         for k, v in widget_store.items():
-            app_s = v['w_stat'].value
-            app_n = v['w_note'].value
+            app_s = v['w_stat'].value; app_n = v['w_note'].value
             persist_store[k] = {"app_status": app_s, "app_note": app_n, "reviewers": {}}
-            
             for rk, rv in v['revs'].items():
-                ovr = rv['w_ovr'].value
-                nt = rv['w_note'].value
-                persist_store[k]["reviewers"][rk] = {"override": ovr, "note": nt}
-                
-                final = app_s if app_s != "Calculated" else (ovr if ovr != "-" else rv['sys']['status_calc'])
-                
-                data_rows.append({
-                    "Category": v['data']['Category'], "App Name": v['data']['App_Name'], "Reviewer": rk,
-                    "System Status": rv['sys']['status_calc'], "Error Message": rv['sys']['error_msg'],
-                    "Approved": rv['sys']['stats']['Appr'], "Denied": rv['sys']['stats']['Deny'], "Changes": rv['sys']['stats']['Chg'],
-                    "Missing Items": rv['sys']['missing_cnt'], "Manual Override": ovr, "Final Status": final, 
-                    "Note": nt, "App Note": app_n, "Folder Link": rv['sys']['folder_url']
-                })
-        
-        # 3. SAVE full store
+                persist_store[k]["reviewers"][rk] = {"override": rv['w_ovr'].value, "note": rv['w_note'].value}
         save_json(NOTES_FILE, persist_store)
         
-        if data_rows:
-            f = f"{output_dir}/Report_{ts}.xlsx"
-            pd.DataFrame(data_rows).to_excel(f, index=False)
-            lbl_out.value = "Saved!"
-            display(HTML(f"✅ Report: <a href='{f}' target='_blank'>{f}</a>"))
+        # 2. Generate Individual App Reports
+        for app_key, widget_data in widget_store.items():
+            app_name = widget_data['data']['App_Name']
+            category = widget_data['data']['Category']
+            app_errors = [e for e in errors if e['App_Name'] == app_name]
+            suffix = "_Incomplete" if app_errors else ""
+            
+            if df.empty: app_rows = []
+            else: app_rows = df[(df['Category'] == category) & (df['App_Name'] == app_name)].to_dict('records')
+            
+            if not app_rows and app_errors:
+                 app_rows = [{"reviewer": e['reviewer'], "details": f"Error: {e['error']}", "response": "Error"} for e in app_errors]
+
+            final_data = []
+            for row in app_rows:
+                rev_name = row.get('reviewer')
+                dash_rev = widget_data['revs'].get(rev_name, {})
+                
+                # Logic for Summary Report Row
+                if dash_rev and rev_name: 
+                    # We check if we already added this reviewer for this app to summary (to avoid duplicates if multiple rows)
+                    # Simple way: just add one summary row per reviewer per app
+                    pass 
+                
+                sys_status = dash_rev.get('sys', {}).get('status_calc', 'Unknown')
+                ovr = dash_rev.get('w_ovr', widgets.Dropdown()).value if dash_rev else "-"
+                final_status = widget_data['w_stat'].value if widget_data['w_stat'].value != "Calculated" else (ovr if ovr != "-" else sys_status)
+                
+                # ★ Feedback 1: Ensure 'details' (Column E) is captured
+                details_val = row.get('details') 
+                if details_val is None: details_val = ""
+                
+                final_data.append({
+                    "Reviewer": rev_name,
+                    "File Name": row.get('file_name', ''),
+                    "Row Num": row.get('row_number', ''),
+                    "Reviewer Response": row.get('response', ''), 
+                    "Details of Access Change": details_val, # ★ Correctly mapped
+                    "Final Status": final_status,
+                    "Manual Override": ovr,
+                    "Admin Note": dash_rev.get('w_note', widgets.Text()).value if dash_rev else "",
+                    "File Created": row.get('File_Created_Date', ''),
+                    "Last Modified": row.get('Last_Modified', ''),
+                    "Full Audit Log": row.get('Audit_Log', '')
+                })
+            
+            # Add to Summary (One row per Reviewer, not per file row)
+            for r_name, r_d in widget_data['revs'].items():
+                sys_st = r_d['sys'].get('status_calc', 'Unknown')
+                ovr_v = r_d['w_ovr'].value
+                fin_st = widget_data['w_stat'].value if widget_data['w_stat'].value != "Calculated" else (ovr_v if ovr_v != "-" else sys_st)
+                
+                summary_rows.append({
+                    "Category": category, "App Name": app_name, "Reviewer": r_name,
+                    "System Status": sys_st, "Override": ovr_v, "Final Status": fin_st,
+                    "Missing Items": r_d['sys'].get('missing_cnt', 0),
+                    "Appr": r_d['sys']['stats'].get('Appr', 0),
+                    "Deny": r_d['sys']['stats'].get('Deny', 0),
+                    "Chg": r_d['sys']['stats'].get('Chg', 0),
+                    "App Note": widget_data['w_note'].value, "Rev Note": r_d['w_note'].value
+                })
+
+            if final_data:
+                # ★ Feedback 2: Filename with Parent Folder & Date
+                safe_name = re.sub(r'[\\/*?:"<>|]', "", app_name)
+                safe_cat = re.sub(r'[\\/*?:"<>|]', "", category)
+                f_name = f"{output_dir}/{safe_cat}_{safe_name}_{ts}{suffix}.xlsx"
+                pd.DataFrame(final_data).to_excel(f_name, index=False)
+                saved_files.append(f"<a href='{f_name}' target='_blank'>{safe_cat}/{safe_name}</a>")
         
-        b.disabled=False; b.description="💾 Save Final Report"
+        # ★ Feedback 3: Generate Status_Summary.xlsx
+        if summary_rows:
+            sum_file = f"{output_dir}/Status_Summary_{ts}.xlsx"
+            pd.DataFrame(summary_rows).to_excel(sum_file, index=False)
+            saved_files.insert(0, f"<b><a href='{sum_file}' target='_blank'>[Status Summary]</a></b>")
+
+        lbl_out.value = f"Saved {len(saved_files)} files."
+        display(HTML("✅ Saved: " + " | ".join(saved_files)))
+        b.disabled=False; b.description="💾 Save All Reports"
 
     btn_export.on_click(export)
     display(widgets.HBox([btn_export, lbl_out]))
