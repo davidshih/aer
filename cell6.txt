@@ -1,14 +1,13 @@
-# === Cell 6: Email Notification System (Subject & Body Preview) ===
+# === Cell 6: Email Notification (Merge Capability & Custom Template) ===
 import ipywidgets as widgets
 from urllib.parse import quote
 from datetime import datetime, timedelta
 import requests
 import pandas as pd
-from IPython.display import display, clear_output
+from IPython.display import display, clear_output, HTML
 
 # --- 1. Helper Functions ---
 def get_email(name): 
-    """Attempts to find email via Graph API."""
     if not name: return ""
     try:
         clean = quote(name.split("(")[0].strip())
@@ -18,213 +17,276 @@ def get_email(name):
     except: pass
     return ""
 
-def calculate_due_date(iso_date_str):
+def fmt_date_long(iso_date_str):
+    """Converts ISO date to 'December 10, 2025' format"""
+    if not iso_date_str or pd.isna(iso_date_str): return "Unknown Date"
+    try:
+        dt_str = str(iso_date_str).replace('Z', '').split('.')[0]
+        dt = datetime.fromisoformat(dt_str)
+        return dt.strftime("%B %d, %Y")
+    except: return str(iso_date_str)
+
+def calc_due_date_long(iso_date_str):
+    """Calculates Due Date (Created + 14 days) in 'December 24, 2025' format"""
     if not iso_date_str or pd.isna(iso_date_str): return "ASAP"
     try:
         dt_str = str(iso_date_str).replace('Z', '').split('.')[0]
         dt = datetime.fromisoformat(dt_str)
         due = dt + timedelta(days=14)
-        return due.strftime("%b %d, %Y")
+        return due.strftime("%B %d, %Y")
     except: return "ASAP"
 
-# --- 2. Filter Targets ---
+# --- 2. Data Preparation ---
 if 'df' not in globals() or df.empty:
     display(widgets.HTML("<h4 style='color:red'>⚠️ No data found. Run Cell 4 first.</h4>"))
 else:
-    # Logic: Get pending, filter out manual overrides
+    # Filter Pending Items
     pending_df = df[df['is_missing'] == True].copy()
+    
+    # Group by App & Reviewer to get counts
     targets = pending_df.groupby(["Category", "App_Name", "reviewer", "folder_url"]).agg(
         missing_count=("is_missing", "count"),
-        file_date=("Last_Modified", "min") 
+        file_date_raw=("File_Created_Date", "min") 
     ).reset_index()
 
+    # Apply Manual Overrides Filtering
     final_targets = []
     notes_db = manual_data_store if 'manual_data_store' in globals() else {}
-
-    print("🔍 Looking up emails...")
     
+    print("🔍 Looking up emails for pending reviewers...")
+    
+    # Cache emails to avoid repeated API calls during re-renders
+    email_cache = {} 
+    
+    raw_data_list = []
     for _, r in targets.iterrows():
         app_key = f"{r['Category']} > {r['App_Name']}"
         rev_key = r['reviewer']
         
-        # Check Manual Overrides
+        # Check Overrides
         app_node = notes_db.get(app_key, {})
         if app_node.get("app_status") in ["Force Completed", "N/A"]: continue
-        
         rev_override = app_node.get("reviewers", {}).get(rev_key, {}).get("override", "-")
         if rev_override in ["Mark Done", "Waived", "Escalated"]: continue
+        
+        # Get Email
+        if rev_key not in email_cache:
+            email_cache[rev_key] = get_email(rev_key)
             
-        final_targets.append({
-            "App_Name": r['App_Name'], "reviewer": r['reviewer'],
-            "missing": r['missing_count'], "folder_url": r['folder_url'],
-            "due_date": calculate_due_date(r['file_date']),
-            "email": get_email(r['reviewer'])
+        raw_data_list.append({
+            "App_Name": r['App_Name'], 
+            "reviewer": r['reviewer'],
+            "missing": r['missing_count'], 
+            "folder_url": r['folder_url'],
+            "sent_date": fmt_date_long(r['file_date_raw']),
+            "due_date": calc_due_date_long(r['file_date_raw']),
+            "email": email_cache[rev_key]
         })
-
-    target_df = pd.DataFrame(final_targets)
+    
+    clear_output()
 
     # --- 3. UI Construction ---
-    clear_output()
     
-    if target_df.empty:
-        display(widgets.HTML("<h3>✅ Everyone is done! No emails needed.</h3>"))
-    else:
-        # --- GLOBAL SETTINGS ---
+    # Global Settings
+    current_year = datetime.now().year
+    
+    # Templates (Apple Bank Style)
+    default_subj_single = f"REMINDER - {current_year} {{app_name}} Entitlement Review"
+    default_subj_merge = f"REMINDER - {current_year} Entitlement Reviews Action Required"
+    
+    default_body = (
+        "The Information Security team is sending you a reminder to complete the <b>{app_name}</b> entitlement review that was sent to you on <b>{sent_date}</b>.<br><br>"
+        "The review was due on <b>{due_date}</b>. Please complete this review as soon as possible as it is now overdue. Your prompt assistance to this matter is appreciated.<br><br>"
+        "<b>Review Details:</b>"
+        "<ul><li>Pending Items: <b>{missing}</b></li>"
+        "<li>Link: <a href='{link}'>Open Access Review Folder</a></li></ul><br>"
+        "Sincerely,<br>"
+        "Apple Bank's Information Security Team"
+    )
+
+    # UI Widgets
+    w_merge = widgets.Checkbox(value=True, description="<b>🔗 Merge Apps by Reviewer</b> (Combine multiple apps into one email)", indent=False)
+    w_subject_tpl = widgets.Text(value=default_subj_merge, description="<b>Subject:</b>", layout=widgets.Layout(width='98%'))
+    w_cc_global = widgets.Text(value="", description="<b>Global CC:</b>", placeholder="manager@applebank.com", layout=widgets.Layout(width='50%'))
+    w_body_tpl = widgets.Textarea(value=default_body.replace("<br>", "\n"), layout=widgets.Layout(width='100%', height='150px'))
+    btn_refresh = widgets.Button(description="🔄 Refresh List", button_style='info', layout=widgets.Layout(width='200px'))
+    
+    container_rows = widgets.VBox()
+
+    def render_rows(b=None):
+        container_rows.children = (widgets.Label("Loading..."),)
+        is_merged = w_merge.value
         
-        # Subject Template
-        default_subj = "[Action Required] Access Review: {app_name} (Due: {due_date})"
-        w_subject_tpl = widgets.Text(value=default_subj, description="<b>Subject Tpl:</b>", placeholder="Use {app_name} and {due_date}", layout=widgets.Layout(width='98%'))
+        # Adjust Subject Template based on mode
+        if is_merged and "{app_name}" in w_subject_tpl.value:
+            w_subject_tpl.value = default_subj_merge
+        elif not is_merged and "{app_name}" not in w_subject_tpl.value:
+            w_subject_tpl.value = default_subj_single
+
+        # Prepare Data Grouping
+        df_raw = pd.DataFrame(raw_data_list)
+        if df_raw.empty:
+            container_rows.children = (widgets.HTML("<h3>✅ No pending emails to send!</h3>"),)
+            return
+
+        final_rows = []
         
-        # Global CC
-        w_cc_global = widgets.Text(value="", description="<b>Global CC:</b>", placeholder="manager@company.com", layout=widgets.Layout(width='50%'))
-        
-        # Body Template
-        default_body = (
-            "Hi {name},<br><br>"
-            "This is a reminder that the access review for <b>{app_name}</b> is pending.<br>"
-            "Expected Completion: <b>{due_date}</b>.<br><br>"
-            "<ul><li>Pending items: {missing}</li>"
-            "<li>Link: <a href='{link}'>Click here to review</a></li></ul><br>"
-            "Please complete this as soon as possible."
-        )
-        w_body_tpl = widgets.Textarea(value=default_body.replace("<br>", "\n"), layout=widgets.Layout(width='100%', height='100px'))
-        
-        btn_update_preview = widgets.Button(description="🔄 Refresh Previews", button_style='info', layout=widgets.Layout(width='200px'))
-        
-        # --- BUILD ROWS ---
-        rows_container = []
-        row_logic_map = {}
-        
-        display(widgets.HTML(f"<h3>📧 Email Sender ({len(target_df)} Users)</h3>"))
-        
-        for idx, r in target_df.iterrows():
-            key = f"{idx}_{r['reviewer']}"
-            ctx = {'name': r['reviewer'], 'missing': r['missing'], 'link': r['folder_url'], 'app_name': r['App_Name'], 'due_date': r['due_date']}
+        if is_merged:
+            # Group by Reviewer
+            grouped = df_raw.groupby(['reviewer', 'email'])
+            for (rev, mail), group in grouped:
+                # Create Merged Context
+                apps_html = "<table border='1' style='border-collapse:collapse; width:100%; font-size:12px; border:1px solid #ddd'>"
+                apps_html += "<tr style='background:#f3f3f3'><th>App Name</th><th>Sent Date</th><th>Due Date</th><th>Missing</th><th>Link</th></tr>"
+                
+                for _, row in group.iterrows():
+                    apps_html += f"<tr><td style='padding:5px'>{row['App_Name']}</td><td style='padding:5px'>{row['sent_date']}</td><td style='padding:5px'>{row['due_date']}</td><td style='padding:5px; text-align:center'>{row['missing']}</td><td style='padding:5px'><a href='{row['folder_url']}'>Open</a></td></tr>"
+                apps_html += "</table>"
+
+                final_rows.append({
+                    "key": rev,
+                    "reviewer": rev,
+                    "email": mail,
+                    "ctx": {
+                        "app_name": "following applications", # Fallback for template
+                        "sent_date": "previous dates",
+                        "due_date": "recently",
+                        "missing": int(group['missing'].sum()),
+                        "link": "#"
+                    },
+                    "is_merged": True,
+                    "merged_html": apps_html
+                })
+        else:
+            # Single Rows
+            for idx, r in df_raw.iterrows():
+                final_rows.append({
+                    "key": f"{r['reviewer']}_{r['App_Name']}",
+                    "reviewer": r['reviewer'],
+                    "email": r['email'],
+                    "ctx": {
+                        "app_name": r['App_Name'],
+                        "sent_date": r['sent_date'],
+                        "due_date": r['due_date'],
+                        "missing": r['missing'],
+                        "link": r['folder_url']
+                    },
+                    "is_merged": False
+                })
+
+        # Generate UI Rows
+        ui_items = []
+        row_logic_store = {}
+
+        for item in final_rows:
+            key = item['key']
             
-            # Col 1: Info (30%)
+            # Info Block
+            email_color = "#0078d4" if item['email'] else "red"
+            email_txt = item['email'] if item['email'] else "(No Email Found)"
+            
+            if item['is_merged']:
+                info_html = (f"<b>👤 {item['reviewer']}</b><br>"
+                             f"<span style='color:{email_color}'>{email_txt}</span><br>"
+                             f"<span style='color:darkorange'>Combine {item['ctx']['missing']} items</span>")
+            else:
+                info_html = (f"<b>👤 {item['reviewer']}</b><br>"
+                             f"📂 {item['ctx']['app_name']}<br>"
+                             f"<span style='color:{email_color}'>{email_txt}</span>")
+
             w_chk = widgets.Checkbox(value=True, layout=widgets.Layout(width='30px'))
-            email_color = "#0078d4" if r['email'] else "red"
-            email_status = "" if r['email'] else "(No Email)"
+            w_info = widgets.HTML(info_html, layout=widgets.Layout(width='200px'))
             
-            info_html = (
-                f"<div style='line-height:1.6; font-family:sans-serif;'>"
-                f"<span style='font-size:14px; color:#555'>📂 {r['App_Name']}</span><br>"
-                f"<span style='font-size:16px; font-weight:bold; color:{email_color}'>{r['reviewer']} {email_status}</span><br>"
-                f"<span style='font-size:13px; color:#d13438'>⚠️ Missing: <b>{r['missing']}</b> items</span><br>"
-                f"<span style='font-size:12px; color:#666'>📅 Due: {r['due_date']}</span>"
-                f"</div>"
-            )
-            col_1 = widgets.HBox([w_chk, widgets.HTML(info_html, layout=widgets.Layout(width='280px'))], layout=widgets.Layout(width='30%'))
+            # Preview Generation
+            tpl_body = w_body_tpl.value.replace("\n", "<br>")
+            
+            if item['is_merged']:
+                # Custom injection for Merged
+                # We replace the list part of the standard template with the table
+                base_text = "The Information Security team is sending you a reminder to complete the entitlement reviews for the following applications:<br><br>"
+                base_text += item['merged_html'] + "<br><br>"
+                base_text += "Please complete these reviews as soon as possible. Your prompt assistance to this matter is appreciated.<br><br>Sincerely,<br>Apple Bank's Information Security Team"
+                final_preview_html = base_text
+            else:
+                final_preview_html = tpl_body.format(**item['ctx'])
 
-            # Col 2: Previews (45%)
-            # A. Subject Preview
-            try:
-                subj_txt = default_subj.format(**ctx)
-            except: subj_txt = default_subj
-            w_subj_preview = widgets.HTML(f"<div style='background:#f3f2f1; padding:4px; border-bottom:1px solid #ccc; font-weight:bold; font-size:12px; color:#333'>{subj_txt}</div>")
+            w_preview = widgets.HTML(value=f"<div style='font-family:sans-serif; font-size:12px; padding:5px; color:#333'>{final_preview_html}</div>", 
+                                     layout=widgets.Layout(width='100%', height='140px', border='1px solid #eee', overflow_y='auto'))
             
-            # B. Body Preview
-            body_txt = default_body.format(**ctx)
-            w_body_preview = widgets.HTML(
-                value=f"<div style='font-family:sans-serif; font-size:12px; padding:8px'>{body_txt}</div>",
-                layout=widgets.Layout(width='100%', height='100px', overflow_y='auto')
-            )
-            
-            # Container for Previews (simulating an email window)
-            preview_box = widgets.VBox([w_subj_preview, w_body_preview], layout=widgets.Layout(width='95%', border='1px solid #e0e0e0', margin='0 10px'))
-            col_2 = widgets.VBox([widgets.Label("Message Preview:"), preview_box], layout=widgets.Layout(width='45%'))
+            w_email = widgets.Text(value=item['email'], placeholder="Email", layout=widgets.Layout(width='98%'))
+            w_btn = widgets.Button(description="🚀 Send", button_style='warning', layout=widgets.Layout(width='80px'))
 
-            # Col 3: Actions (25%)
-            w_email = widgets.Text(value=r['email'], placeholder="Email Address", description="To:", layout=widgets.Layout(width='95%'))
-            w_btn_send = widgets.Button(description="🚀 Send Email", button_style='warning', layout=widgets.Layout(width='95%', height='40px'))
-            col_3 = widgets.VBox([w_email, widgets.HTML("<br>"), w_btn_send], layout=widgets.Layout(width='25%', align_items='center', justify_content='center'))
-
-            # Row Container
-            row_box = widgets.HBox([col_1, col_2, col_3], 
-                                   layout=widgets.Layout(height='160px', border='1px solid #ccc', margin='10px 0', padding='10px', align_items='center', background_color="#fcfcfc"))
-            
-            rows_container.append(row_box)
-            
-            row_logic_map[key] = {
-                'ctx': ctx, 
-                'w_subj_prev': w_subj_preview, 
-                'w_body_prev': w_body_preview, 
-                'w_email': w_email, 
-                'w_btn': w_btn_send, 
-                'w_chk': w_chk
-            }
-
-            # --- SEND HANDLER ---
-            def create_sender(k):
+            # Action
+            def create_sender(k, preview_html, subj_tpl):
                 def on_send(b):
-                    data = row_logic_map[k]
-                    if not data['w_email'].value:
-                        b.description = "❌ Missing Email"; return
+                    if not row_logic_store[k]['w_email'].value:
+                        b.description = "No Email"; return
                     
-                    b.disabled = True; b.description = "Sending..."
+                    b.disabled = True; b.description = "..."
                     
-                    # 1. Format Content using Global Templates
-                    tpl_subj = w_subject_tpl.value
-                    tpl_body = w_body_tpl.value.replace("\n", "<br>")
+                    # Subject Logic
                     try:
-                        final_subj = tpl_subj.format(**data['ctx'])
-                        final_body = tpl_body.format(**data['ctx'])
-                    except:
-                        final_subj = tpl_subj; final_body = tpl_body
+                        if item['is_merged']: final_subj = subj_tpl
+                        else: final_subj = subj_tpl.format(**item['ctx'])
+                    except: final_subj = subj_tpl
+                    
+                    # API Call
+                    try:
+                        url = f"https://graph.microsoft.com/v1.0/users/{SENDER_EMAIL}/sendMail"
+                        to_list = [{"emailAddress": {"address": row_logic_store[k]['w_email'].value}}]
+                        cc_list = [{"emailAddress": {"address": w_cc_global.value.strip()}}] if w_cc_global.value.strip() else []
                         
-                    # 2. Recipients
-                    to_list = [{"emailAddress": {"address": data['w_email'].value}}]
-                    cc_list = []
-                    if w_cc_global.value.strip():
-                        cc_list.append({"emailAddress": {"address": w_cc_global.value.strip()}})
-                    
-                    # 3. API
-                    url = f"https://graph.microsoft.com/v1.0/users/{SENDER_EMAIL}/sendMail"
-                    payload = {"message": {"subject": final_subj, "body": {"contentType": "HTML", "content": final_body}, "toRecipients": to_list, "ccRecipients": cc_list}}
-                    
-                    try:
-                        resp = requests.post(url, headers={**headers, "Content-Type": "application/json"}, json=payload)
-                        if resp.status_code == 202:
-                            b.button_style = 'success'; b.description = "✅ Sent"
-                            data['w_chk'].value = False
+                        payload = {
+                            "message": {
+                                "subject": final_subj,
+                                "body": {"contentType": "HTML", "content": preview_html},
+                                "toRecipients": to_list,
+                                "ccRecipients": cc_list
+                            }
+                        }
+                        r = requests.post(url, headers={**headers, "Content-Type": "application/json"}, json=payload)
+                        if r.status_code == 202:
+                            b.button_style = 'success'; b.description = "Sent"
+                            row_logic_store[k]['w_chk'].value = False
                         else:
-                            b.button_style = 'danger'; b.description = "❌ Failed"
-                            print(f"Err: {resp.text}")
+                            b.button_style = 'danger'; b.description = "Fail"
+                            print(r.text)
                     except Exception as e:
-                        b.button_style = 'danger'; b.description = "❌ Error"
-                        print(e)
+                        print(e); b.button_style = 'danger'
                     finally:
-                        if b.description != "✅ Sent": b.disabled = False
+                         if b.description != "Sent": b.disabled = False
                 return on_send
 
-            w_btn_send.on_click(create_sender(key))
-
-        # --- UPDATE PREVIEWS HANDLER ---
-        def update_previews(b):
-            raw_body = w_body_tpl.value.replace("\n", "<br>")
-            raw_subj = w_subject_tpl.value
+            w_btn.on_click(create_sender(key, final_preview_html, w_subject_tpl.value))
             
-            for k, d in row_logic_map.items():
-                try:
-                    # Update Subject Preview Widget
-                    new_subj = raw_subj.format(**d['ctx'])
-                    d['w_subj_prev'].value = f"<div style='background:#f3f2f1; padding:4px; border-bottom:1px solid #ccc; font-weight:bold; font-size:12px; color:#333'>{new_subj}</div>"
-                    
-                    # Update Body Preview Widget
-                    new_body = raw_body.format(**d['ctx'])
-                    d['w_body_prev'].value = f"<div style='font-family:sans-serif; font-size:12px; padding:8px'>{new_body}</div>"
-                except: pass
-        
-        btn_update_preview.on_click(update_previews)
+            row_logic_store[key] = {'w_chk': w_chk, 'w_email': w_email}
+            
+            row_ui = widgets.HBox([
+                w_chk, 
+                w_info, 
+                widgets.VBox([widgets.Label("Preview:"), w_preview], layout=widgets.Layout(flex='1', padding='0 10px')),
+                widgets.VBox([widgets.Label("Action:"), w_email, w_btn], layout=widgets.Layout(width='150px'))
+            ], layout=widgets.Layout(border='1px solid #ccc', margin='5px 0', padding='5px', align_items='center'))
+            
+            ui_items.append(row_ui)
 
-        # --- FINAL RENDER ---
-        top_controls = widgets.VBox([
-            widgets.HTML("<b>Global Email Settings</b>"),
-            w_subject_tpl,
-            w_cc_global,
-            widgets.Label("Body Template:"),
-            widgets.HBox([w_body_tpl, btn_update_preview], layout=widgets.Layout(align_items='center'))
-        ], layout=widgets.Layout(padding='15px', border='2px solid #0078d4', margin='0 0 20px 0', background_color='#eef6fb'))
+        container_rows.children = tuple(ui_items)
 
-        display(top_controls)
-        display(widgets.VBox(rows_container))
+    w_merge.observe(render_rows, names='value')
+    btn_refresh.on_click(render_rows)
+    
+    # Render Initial
+    render_rows()
+
+    # Layout
+    header = widgets.VBox([
+        widgets.HTML("<h3>📧 Email Notification Center (Apple Bank Style)</h3>"),
+        widgets.HBox([w_merge, btn_refresh]),
+        widgets.HTML("<hr>"),
+        w_subject_tpl,
+        w_cc_global,
+        widgets.Label("Body Template (Single App Only - Merged uses automatic table):"),
+        w_body_tpl
+    ], layout=widgets.Layout(background_color='#f0f4f8', padding='10px', border='1px solid #ccc', margin='0 0 10px 0'))
+
+    display(header, container_rows)
