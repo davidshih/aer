@@ -1,6 +1,5 @@
 {
   "Q4|AVIDXCHANGE-TEST|Bob O'Brien": {
-    "v": 4.1,
     "last_mod": "2025-12-29T17:32:03Z",
     "stats": {
       "Appr": 3,
@@ -15,36 +14,23 @@
     },
     "rows": [
       {
-        "reviewer": "Bob O'Brien",
         "response": "Approved",
         "details": "Access verified",
-        "is_missing": false,
-        "row_number": 11,
-        "file_name": "Bob O'Brien_Access_Review_2025Q4.xlsx",
-        "folder_url": "https://davidshih.sharepoint.com/sites/aer/Shared%20Documents/2025%20Entitlement%20Review/Q4/AVIDXCHANGE-TEST/Bob%20O%27Brien"
+        "row_number": 11
       },
       {
-        "reviewer": "Bob O'Brien",
         "response": "Approved",
         "details": "No issues",
-        "is_missing": false,
-        "row_number": 12,
-        "file_name": "Bob O'Brien_Access_Review_2025Q4.xlsx",
-        "folder_url": "https://davidshih.sharepoint.com/sites/aer/Shared%20Documents/2025%20Entitlement%20Review/Q4/AVIDXCHANGE-TEST/Bob%20O%27Brien"
+        "row_number": 12
       },
       {
-        "reviewer": "Bob O'Brien",
         "response": "Approved",
         "details": "Confirmed",
-        "is_missing": false,
-        "row_number": 13,
-        "file_name": "Bob O'Brien_Access_Review_2025Q4.xlsx",
-        "folder_url": "https://davidshih.sharepoint.com/sites/aer/Shared%20Documents/2025%20Entitlement%20Review/Q4/AVIDXCHANGE-TEST/Bob%20O%27Brien"
+        "row_number": 13
       }
     ]
   },
   "Q4|Visa|Alice Wonderland": {
-    "v": 4.1,
     "last_mod": "2026-01-02T20:07:08Z",
     "stats": {
       "Appr": 5,
@@ -59,49 +45,29 @@
     },
     "rows": [
       {
-        "reviewer": "Alice Wonderland",
         "response": "Revoke",
         "details": "No longer needs access",
-        "is_missing": false,
-        "row_number": 2,
-        "file_name": "Alice Wonderland_Access_Review_2025Q4.xlsx",
-        "folder_url": "https://davidshih.sharepoint.com/sites/aer/Shared%20Documents/2025%20Entitlement%20Review/Q4/Visa/Alice%20Wonderland"
+        "row_number": 2
       },
       {
-        "reviewer": "Alice Wonderland",
         "response": "Revoke",
         "details": "No longer needs access",
-        "is_missing": false,
-        "row_number": 3,
-        "file_name": "Alice Wonderland_Access_Review_2025Q4.xlsx",
-        "folder_url": "https://davidshih.sharepoint.com/sites/aer/Shared%20Documents/2025%20Entitlement%20Review/Q4/Visa/Alice%20Wonderland"
+        "row_number": 3
       },
       {
-        "reviewer": "Alice Wonderland",
         "response": "Revoke",
         "details": "No longer needs access",
-        "is_missing": false,
-        "row_number": 4,
-        "file_name": "Alice Wonderland_Access_Review_2025Q4.xlsx",
-        "folder_url": "https://davidshih.sharepoint.com/sites/aer/Shared%20Documents/2025%20Entitlement%20Review/Q4/Visa/Alice%20Wonderland"
+        "row_number": 4
       },
       {
-        "reviewer": "Alice Wonderland",
         "response": "Approved",
         "details": "Maintain access",
-        "is_missing": false,
-        "row_number": 5,
-        "file_name": "Alice Wonderland_Access_Review_2025Q4.xlsx",
-        "folder_url": "https://davidshih.sharepoint.com/sites/aer/Shared%20Documents/2025%20Entitlement%20Review/Q4/Visa/Alice%20Wonderland"
+        "row_number": 5
       },
       {
-        "reviewer": "Alice Wonderland",
         "response": "Revoke",
         "details": "No longer needs access",
-        "is_missing": false,
-        "row_number": 6,
-        "file_name": "Alice Wonderland_Access_Review_2025Q4.xlsx",
-        "folder_url": "https://davidshih.sharepoint.com/sites/aer/Shared%20Documents/2025%20Entitlement%20Review/Q4/Visa/Alice%20Wonderland"
+        "row_number": 6
       }
     ]
   },
