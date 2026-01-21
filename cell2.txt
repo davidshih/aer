@@ -1,143 +1,108 @@
-# === Cell 2: 設定與認證 (完整修復版) ===
+# === Cell 2: SharePoint API, App Selector (with Counts) ===
 import ipywidgets as widgets
 from IPython.display import display, clear_output
 import requests
 
-# --- 1. SharePoint API Functions (核心函數定義) ---
+# --- 1. SharePoint API Functions ---
 def get_site_id(site_name: str) -> str:
     url = f"https://graph.microsoft.com/v1.0/sites/{SHAREPOINT_HOST}:/sites/{site_name}"
     resp = requests.get(url, headers=headers)
     resp.raise_for_status()
     return resp.json()["id"]
 
-def list_folders(site_id: str, path: str) -> list[dict]:
+def list_folders_with_count(site_id: str, path: str) -> list[dict]:
+    """
+    Returns list of folders with 'childCount' (how many subfolders/files inside)
+    """
     if not path or path.strip() == "":
         url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root/children"
     else:
         clean_path = path.strip("/")
         url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/{clean_path}:/children"
+    
     resp = requests.get(url, headers=headers)
-    return [
-        {"name": item["name"], "webUrl": item.get("webUrl", "")}
-        for item in resp.json().get("value", []) if item.get("folder")
-    ]
-
-def list_excel_files(site_id: str, folder_path: str) -> list[dict]:
-    clean_path = folder_path.strip("/")
-    url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/{clean_path}:/children"
-    resp = requests.get(url, headers=headers)
-    files = []
+    results = []
     for item in resp.json().get("value", []):
-        if item["name"].endswith(".xlsx"):
-            files.append({
-                "id": item["id"], "name": item["name"],
-                "lastModifiedDateTime": item.get("lastModifiedDateTime"),
-                "createdDateTime": item.get("createdDateTime"), # 抓取檔案建立時間
-                "webUrl": item.get("webUrl")
+        if item.get("folder"):
+            # Graph API returns 'childCount' inside the folder property
+            count = item.get("folder", {}).get("childCount", 0)
+            results.append({
+                "name": item["name"], 
+                "webUrl": item.get("webUrl", ""),
+                "count": count
             })
-    return sorted(files, key=lambda f: f.get("lastModifiedDateTime", ""), reverse=True)
-
-def download_file(site_id: str, file_path: str) -> bytes:
-    clean_path = file_path.strip("/")
-    url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/{clean_path}:/content"
-    resp = requests.get(url, headers=headers)
-    resp.raise_for_status()
-    return resp.content
-
-def get_file_audit_info(site_id: str, file_id: str) -> dict:
-    url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/items/{file_id}/versions"
-    resp = requests.get(url, headers=headers)
-    default_res = {"log": "N/A", "creator": "Unknown", "modifier": "Unknown", "created_ts": None}
-    
-    if resp.status_code != 200: return default_res
-    
-    versions = resp.json().get("value", [])
-    if not versions: return default_res
-
-    # 1. 解析 Log
-    logs = []
-    for v in versions:
-        mod_time = v.get("lastModifiedDateTime", "")[:19].replace("T", " ")
-        actor = v.get("lastModifiedBy", {}).get("user", {}).get("displayName") or "System"
-        logs.append(f"{mod_time} - {actor}")
-    
-    # 2. 抓取首尾版本資訊
-    last_v = versions[0]
-    first_v = versions[-1] # 最早的版本
-
-    return {
-        "log": "\n".join(logs),
-        "creator": first_v.get("lastModifiedBy", {}).get("user", {}).get("displayName") or "System",
-        "modifier": last_v.get("lastModifiedBy", {}).get("user", {}).get("displayName") or "System",
-        "created_ts": first_v.get("lastModifiedDateTime")
-    }
+    return results
 
 # --- 2. Initialize Connection ---
 try:
     site_id = get_site_id(SITE_NAME)
-    logger.info(f"✅ SharePoint 連線成功 (Site ID: {site_id[:10]}...)")
+    logger.info(f"✅ SharePoint Connected (Site ID: {site_id[:10]}...)\")
 except Exception as e:
-    logger.error(f"❌ 連線失敗: {e}")
-    # 不要在這裡 raise，以免阻斷後續修正，但通常這裡失敗後面也跑不動
+    logger.error(f"❌ Connection Failed: {e}")
 
-# --- 3. Tree Selector UI (含 Cache 開關) ---
+# --- 3. Tree Selector UI (with Counts) ---
 TARGET_APPS = [] 
-USE_CACHE = True # Default Global Variable
+USE_CACHE = True 
 
 def create_app_selector():
-    print(f"📂 正在讀取根目錄: {BASE_PATH} ...")
+    print(f"📂 Reading Root: {BASE_PATH} ...")
     try:
-        categories = list_folders(site_id, BASE_PATH)
+        categories = list_folders_with_count(site_id, BASE_PATH)
     except Exception as e:
-        print(f"❌ 讀取失敗: {e}")
+        print(f"❌ Read Failed: {e}")
         return
 
     ui_container = widgets.VBox()
     app_checkboxes = []
     
-    # Cache Toggle
-    chk_cache = widgets.Checkbox(value=True, description="⚡ 使用快取 (Use Cache)", indent=False)
-    ui_container.children += (widgets.HTML("<h3>📂 App 選擇器</h3>"), chk_cache, widgets.HTML("<hr>"))
+    chk_cache = widgets.Checkbox(value=True, description="⚡ Use Cache (Faster)", indent=False)
+    ui_container.children += (widgets.HTML("<h3>📂 App Selector (v3.6)</h3>"), chk_cache, widgets.HTML("<hr>"))
 
     for cat in categories:
         if cat['name'] in ["Forms", "_private"] or "audit" in cat['name'].lower(): continue
             
-        cat_label = widgets.HTML(f"<b>📁 {cat['name']}</b>", layout=widgets.Layout(width='100px'))
-        btn_expand = widgets.Button(description="➕ 展開", button_style='info', layout=widgets.Layout(width='80px'))
+        # Show Category Label
+        cat_label = widgets.HTML(f"<b>📁 {cat['name']}</b>", layout=widgets.Layout(width='150px'))
+        btn_expand = widgets.Button(description="➕ Expand", button_style='info', layout=widgets.Layout(width='80px'))
         app_list_box = widgets.VBox(layout=widgets.Layout(margin='0 0 0 30px', display='none'))
         
         def on_expand(b, cat_name=cat['name'], container=app_list_box, btn=btn_expand):
-            if btn.description == "➕ 展開":
+            if btn.description == "➕ Expand":
                 btn.description = "⏳"
                 sub_path = f"{BASE_PATH}/{cat_name}"
                 try:
-                    apps = list_folders(site_id, sub_path)
+                    apps = list_folders_with_count(site_id, sub_path)
                     checks = []
-                    if not apps: checks.append(widgets.Label("(無資料夾)"))
+                    if not apps: checks.append(widgets.Label("(Empty)"))
                     
                     for app in apps:
                         if app['name'] in ["Forms", "_private"]: continue
-                        cb = widgets.Checkbox(value=False, description=app['name'], indent=False)
+                        # Display count of sub-items (users)
+                        count_display = f" <span style='color:#888; font-size:11px'>({app['count']} users)</span>"
+                        cb = widgets.Checkbox(value=False, description=app['name'], indent=False, layout=widgets.Layout(width='400px'))
+                        # Hack to render HTML in checkbox description is hard, so we use HBox
+                        lbl_count = widgets.HTML(count_display)
+                        
                         cb.app_data = (cat_name, app['name'], f"{sub_path}/{app['name']}")
-                        checks.append(cb)
                         app_checkboxes.append(cb)
+                        checks.append(widgets.HBox([cb, lbl_count]))
                     
                     container.children = tuple(checks)
                     container.layout.display = 'block'
-                    btn.description = "➖ 收起"
+                    btn.description = "➖ Collapse"
                 except Exception as e:
                     container.children = (widgets.Label(f"Error: {e}"),)
                     btn.description = "❌"
             else:
                 if container.layout.display == 'none':
-                    container.layout.display = 'block'; btn.description = "➖ 收起"
+                    container.layout.display = 'block'; btn.description = "➖ Collapse"
                 else:
-                    container.layout.display = 'none'; btn.description = "➕ 展開"
+                    container.layout.display = 'none'; btn.description = "➕ Expand"
 
         btn_expand.on_click(on_expand)
         ui_container.children += (widgets.HBox([btn_expand, cat_label]), app_list_box)
 
-    btn_confirm = widgets.Button(description="✅ 確認選擇", button_style='success', layout=widgets.Layout(margin='20px 0'))
+    btn_confirm = widgets.Button(description="✅ Confirm Selection", button_style='success', layout=widgets.Layout(margin='20px 0'))
     output_area = widgets.Output()
 
     def on_confirm(b):
@@ -147,11 +112,10 @@ def create_app_selector():
         
         with output_area:
             clear_output()
-            if not TARGET_APPS: print("⚠️ 未選擇任何 App！")
+            if not TARGET_APPS: print("⚠️ No apps selected!")
             else:
-                cache_status = "開啟" if USE_CACHE else "關閉 (強制重新讀取)"
-                print(f"🎯 已選擇 {len(TARGET_APPS)} 個 Apps | 快取: {cache_status}")
-                print("⏳ 請執行 Cell 4 開始處理。")
+                print(f"🎯 Selected {len(TARGET_APPS)} Apps | Cache: {USE_CACHE}")
+                print("⏳ Proceed to Cell 4 (Enrichment) or Cell 5 (Scan).")
 
     btn_confirm.on_click(on_confirm)
     display(ui_container, btn_confirm, output_area)
