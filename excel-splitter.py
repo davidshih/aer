@@ -1,12 +1,17 @@
 import sys
 import os
 import shutil
-import time
 import glob
 import platform
 import threading
 import subprocess
 from datetime import datetime
+
+# --- CONFIGURATION ---
+# Change this path to set where logs are saved.
+# Example: r"C:\MyFolder\Logs"
+# Default: Creates a 'logs' folder where this script is running.
+LOG_ROOT_DIR = os.path.join(os.getcwd(), "logs") 
 
 # GUI Imports
 import tkinter as tk
@@ -15,14 +20,12 @@ from tkinter import ttk, filedialog, messagebox, scrolledtext
 # Logic Imports
 try:
     import pandas as pd
-    from openpyxl import load_workbook
 except ImportError:
-    print("Installing required packages...")
+    print("Installing pandas...")
     subprocess.check_call([sys.executable, "-m", "pip", "install", "pandas", "openpyxl"])
     import pandas as pd
-    from openpyxl import load_workbook
 
-# Windows COM Check
+# Windows COM Import
 WIN32COM_AVAILABLE = False
 if platform.system() == 'Windows':
     try:
@@ -30,7 +33,14 @@ if platform.system() == 'Windows':
         import pythoncom
         WIN32COM_AVAILABLE = True
     except ImportError:
-        pass
+        print("⚠️ pywin32 not found. Installing...")
+        try:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "pywin32"])
+            import win32com.client
+            import pythoncom
+            WIN32COM_AVAILABLE = True
+        except:
+            pass
 
 # ==========================================
 # 1. Global Variables & Helper Functions
@@ -45,12 +55,6 @@ def sanitize_folder_name(name: str) -> str:
     for char in invalid_chars:
         sanitized = sanitized.replace(char, '_')
     return sanitized[:255].rstrip()
-
-def find_column(worksheet, column_name):
-    for col_idx, cell in enumerate(worksheet[1], start=1):
-        if cell.value == column_name:
-            return col_idx
-    raise ValueError(f"Column '{column_name}' not found!")
 
 def copy_selected_documents(source_dir, dest_dir, logger):
     """Automatically copies Word and PDF files."""
@@ -86,7 +90,7 @@ def copy_additional_files_list(file_paths: list, dest_dir: str, logger):
             logger(f"  ⚠️ File not found: {path}")
 
 # ==========================================
-# 2. Excel Logic (Robust)
+# 2. Excel COM Logic (The Core)
 # ==========================================
 
 def initialize_excel_com(logger):
@@ -112,42 +116,18 @@ def cleanup_excel_com():
         except: pass
         excel_com_instance = None
 
-def process_hide_rows(file_path, reviewer, column_name, output_folder, logger):
-    """Method A: Hides rows using OpenPyXL (Non-destructive, Safer without Excel)"""
-    try:
-        r_name = sanitize_folder_name(str(reviewer))
-        r_folder = os.path.join(output_folder, r_name)
-        os.makedirs(r_folder, exist_ok=True)
-        
-        base, ext = os.path.splitext(os.path.basename(file_path))
-        new_path = os.path.join(r_folder, f"{base} - {r_name}{ext}")
-        
-        shutil.copy2(file_path, new_path)
-        
-        wb = load_workbook(new_path, keep_vba=True)
-        ws = wb.active
-        col_idx = find_column(ws, column_name)
-        
-        rows_to_hide = []
-        for r in range(2, ws.max_row + 1):
-            val = ws.cell(r, col_idx).value
-            if str(val).strip() != str(reviewer).strip():
-                rows_to_hide.append(r)
-        
-        for r in rows_to_hide:
-            ws.row_dimensions[r].hidden = True
-            
-        wb.save(new_path)
-        wb.close()
-        logger(f"  ✅ Processed (Rows Hidden): {os.path.basename(new_path)}")
-        return True, r_folder
-    except Exception as e:
-        logger(f"  ❌ OpenPyXL Error: {e}")
+def process_reviewer_com(file_path, reviewer, column_name, output_folder, logger):
+    """
+    Strictly uses Windows Excel COM to:
+    1. Open Source
+    2. SaveCopyAs to Destination
+    3. Open Destination
+    4. Filter & Delete Rows
+    """
+    if not WIN32COM_AVAILABLE: 
+        logger("  ❌ Error: Windows Excel COM is not available.")
         return False, None
-
-def process_delete_rows_com(file_path, reviewer, column_name, output_folder, logger):
-    """Method B: Deletes rows using Windows Excel COM (Cleaner Result)"""
-    if not WIN32COM_AVAILABLE: return False, None
+        
     global excel_com_instance
     if not initialize_excel_com(logger): return False, None
     
@@ -160,53 +140,69 @@ def process_delete_rows_com(file_path, reviewer, column_name, output_folder, log
         os.makedirs(r_folder, exist_ok=True)
         
         base, ext = os.path.splitext(os.path.basename(file_path))
-        dst_path = os.path.join(r_folder, f"{base} - {r_name}.xlsx")
+        dst_path = os.path.join(r_folder, f"{base} - {r_name}{ext}")
         
         abs_src = os.path.abspath(file_path)
         abs_dst = os.path.abspath(dst_path)
         
+        # 1. Create a copy using Excel (Preserves EVERYTHING: Formats, Macros, Encryption, etc.)
         wb_source = excel_com_instance.Workbooks.Open(abs_src, ReadOnly=True)
         wb_source.SaveCopyAs(abs_dst)
         wb_source.Close(False)
         
+        # 2. Open the copy to modify data
         wb_dest = excel_com_instance.Workbooks.Open(abs_dst)
         ws = wb_dest.Worksheets(1)
         
+        # 3. Clean slate
         if ws.AutoFilterMode: ws.AutoFilterMode = False
 
+        # 4. Determine Data Range
         last_cell = ws.Cells.SpecialCells(11) # xlCellTypeLastCell
         last_row = last_cell.Row
         last_col = last_cell.Column
         
+        # 5. Find Header Column
         col_idx = None
         for col in range(1, last_col + 1):
-            if str(ws.Cells(1, col).Value).strip() == str(column_name).strip():
+            cell_val = ws.Cells(1, col).Value
+            if str(cell_val).strip() == str(column_name).strip():
                 col_idx = col
                 break
                 
         if not col_idx:
-            logger(f"  ❌ Column '{column_name}' not found.")
+            logger(f"  ❌ Column '{column_name}' not found in first row.")
             wb_dest.Close(False)
             return False, None
             
+        # 6. Apply Filter (Value <> Reviewer)
+        # We assume Row 1 is header, Data starts at Row 2
         full_range = ws.Range(ws.Cells(1, 1), ws.Cells(last_row, last_col))
         full_range.AutoFilter(Field=col_idx, Criteria1=f"<>{reviewer}")
         
+        # 7. Delete Visible Rows (Offset to skip header)
         try:
+            # Offset 1 row down, resize to exclude that row
             data_to_delete = full_range.Offset(1, 0).Resize(last_row - 1, last_col)
+            # Select visible cells only
             visible_cells = data_to_delete.SpecialCells(12) # xlCellTypeVisible
             visible_cells.EntireRow.Delete()
         except Exception as e:
-            pass # No rows to delete
+            # If error is 1004 (No cells found), it means the filter result was empty
+            # (i.e., NO rows matched "<> Reviewer", so everyone is the reviewer).
+            pass 
 
+        # 8. Cleanup
         ws.AutoFilterMode = False
         wb_dest.Save()
         wb_dest.Close()
-        logger(f"  ✅ Processed (Rows Deleted): {os.path.basename(dst_path)}")
+        
+        logger(f"  ✅ Processed: {os.path.basename(dst_path)}")
         return True, r_folder
 
     except Exception as e:
         logger(f"  ❌ COM Error: {e}")
+        # Emergency Cleanup
         try: wb_source.Close(False); except: pass
         try: wb_dest.Close(False); except: pass
         return False, None
@@ -218,16 +214,21 @@ def process_delete_rows_com(file_path, reviewer, column_name, output_folder, log
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Excel Reviewer Splitter Tool")
-        self.geometry("720x800")
+        self.title("Excel Reviewer Splitter (COM Only)")
+        self.geometry("720x750")
         
         # Variables
         self.file_path_var = tk.StringVar()
         self.col_name_var = tk.StringVar(value="Reviewer")
         self.out_dir_var = tk.StringVar()
-        self.mode_var = tk.StringVar(value="delete" if WIN32COM_AVAILABLE else "hide")
-        self.extra_files = [] # List to store file paths
+        self.extra_files = [] 
         
+        # Initial Check
+        if not WIN32COM_AVAILABLE:
+            messagebox.showerror("Missing Requirement", "Windows Excel and 'pywin32' are required for this script.")
+            self.destroy()
+            return
+
         self.create_widgets()
         
     def create_widgets(self):
@@ -235,16 +236,13 @@ class App(tk.Tk):
         pnl = ttk.LabelFrame(self, text="File & Folder Settings", padding=10)
         pnl.pack(fill="x", padx=10, pady=5)
         
-        # Excel Input
         ttk.Label(pnl, text="Excel File:").grid(row=0, column=0, sticky="w")
         ttk.Entry(pnl, textvariable=self.file_path_var, width=55).grid(row=0, column=1, padx=5)
         ttk.Button(pnl, text="Browse", command=self.browse_file).grid(row=0, column=2)
         
-        # Column Name
         ttk.Label(pnl, text="Column Name:").grid(row=1, column=0, sticky="w", pady=5)
         ttk.Entry(pnl, textvariable=self.col_name_var, width=20).grid(row=1, column=1, sticky="w", padx=5)
         
-        # Output Folder
         ttk.Label(pnl, text="Output Folder:").grid(row=2, column=0, sticky="w")
         ttk.Entry(pnl, textvariable=self.out_dir_var, width=55).grid(row=2, column=1, padx=5)
         ttk.Button(pnl, text="Browse", command=self.browse_folder).grid(row=2, column=2)
@@ -258,7 +256,6 @@ class App(tk.Tk):
         ttk.Button(btn_box, text="➕ Add Files...", command=self.add_extra_files).pack(side="left", padx=5)
         ttk.Button(btn_box, text="🗑️ Clear List", command=self.clear_extra_files).pack(side="left")
         
-        # Listbox with Scrollbar
         list_frame = ttk.Frame(pnl_files)
         list_frame.pack(fill="x")
         self.lst_files = tk.Listbox(list_frame, height=5, selectmode="extended", activestyle='none')
@@ -268,30 +265,10 @@ class App(tk.Tk):
         scrollbar.pack(side="right", fill="y")
         self.lst_files.config(yscrollcommand=scrollbar.set)
 
-        # --- Processing Mode ---
-        pnl_opt = ttk.LabelFrame(self, text="Processing Mode", padding=10)
-        pnl_opt.pack(fill="x", padx=10, pady=5)
-        
-        ttk.Label(pnl_opt, text="How should the non-reviewer rows be handled?").pack(anchor="w")
-        
-        # Radio Buttons for Hide vs Delete
-        
-        # Option 1: Hide
-        rb_hide = ttk.Radiobutton(pnl_opt, text="Hide Rows (Fast, preserves all data, just hidden)", 
-                                  variable=self.mode_var, value="hide")
-        rb_hide.pack(anchor="w", pady=2)
-        
-        # Option 2: Delete
-        delete_text = "Delete Rows (Cleaner file, requires Windows Excel)"
-        if not WIN32COM_AVAILABLE:
-            delete_text += " [UNAVAILABLE - Excel not found]"
-        
-        rb_delete = ttk.Radiobutton(pnl_opt, text=delete_text, 
-                                    variable=self.mode_var, value="delete",
-                                    state="normal" if WIN32COM_AVAILABLE else "disabled")
-        rb_delete.pack(anchor="w", pady=2)
-
-        ttk.Label(pnl_opt, text="ℹ️ Word (.doc/x) and PDF (.pdf) files are always copied automatically.", foreground="gray").pack(anchor="w", pady=(5,0))
+        # --- Info ---
+        pnl_info = ttk.Frame(self, padding=10)
+        pnl_info.pack(fill="x")
+        ttk.Label(pnl_info, text="ℹ️ Word (.doc/x) and PDF (.pdf) files in source folder are auto-copied.", foreground="gray").pack(anchor="w")
 
         # --- Run & Progress ---
         btn_frame = ttk.Frame(self)
@@ -300,7 +277,6 @@ class App(tk.Tk):
         self.btn_run = ttk.Button(btn_frame, text="🚀 Start Processing", command=self.start_thread)
         self.btn_run.pack(side="left", padx=5)
 
-        # Progress Label and Bar
         progress_frame = ttk.Frame(self)
         progress_frame.pack(fill="x", padx=10, pady=5)
         
@@ -316,10 +292,9 @@ class App(tk.Tk):
         self.log_area.pack(fill="both", expand=True, padx=10, pady=5)
 
     def browse_file(self):
-        f = filedialog.askopenfilename(filetypes=[("Excel Files", "*.xlsx *.xlsm")])
+        f = filedialog.askopenfilename(filetypes=[("Excel Files", "*.xlsx *.xlsm *.xls")])
         if f: 
             self.file_path_var.set(f)
-            # Automatically set output directory to the same folder as input
             parent_dir = os.path.dirname(f)
             self.out_dir_var.set(parent_dir)
 
@@ -360,11 +335,10 @@ class App(tk.Tk):
         file_path = self.file_path_var.get()
         col_name = self.col_name_var.get()
         out_folder = self.out_dir_var.get()
-        mode = self.mode_var.get()
         
-        # Create Log File in subfolder
+        # Setup Logging based on Config Variable
         today_str = datetime.now().strftime("%Y-%m-%d")
-        log_dir = os.path.join(out_folder, "log", today_str)
+        log_dir = os.path.join(LOG_ROOT_DIR, today_str)
         try:
             os.makedirs(log_dir, exist_ok=True)
             log_path = os.path.join(log_dir, f"aer-share-{today_str}.log")
@@ -372,7 +346,7 @@ class App(tk.Tk):
         except:
             self.log("⚠️ Could not create log file path", "WARN")
         
-        self.log(f"🚀 Starting Task (Mode: {mode.upper()})...")
+        self.log("🚀 Starting Task (Method: COM/Excel Native)")
         self.lbl_progress_text.config(text="Initializing...")
         
         try:
@@ -380,7 +354,14 @@ class App(tk.Tk):
                 self.log("❌ Excel file not found!", "ERROR")
                 return
 
-            df = pd.read_excel(file_path, engine='openpyxl')
+            # Read unique Reviewers using Pandas (Read-Only safe)
+            # We use openpyxl engine for reading, but NOT writing.
+            try:
+                df = pd.read_excel(file_path) # Let pandas decide engine, usually openpyxl or xlrd
+            except Exception as e:
+                self.log(f"❌ Error reading file list: {e}")
+                return
+
             if col_name not in df.columns:
                 self.log(f"❌ Column '{col_name}' not found.", "ERROR")
                 return
@@ -392,33 +373,21 @@ class App(tk.Tk):
             self.progress["maximum"] = total
             self.progress["value"] = 0
 
-            # Initialize Excel COM if we are in delete mode
-            if mode == "delete" and WIN32COM_AVAILABLE:
-                pythoncom.CoInitialize()
+            pythoncom.CoInitialize() # Init thread for COM
 
             for i, reviewer in enumerate(reviewers):
-                # Update Text Label with Count
                 display_text = f"Processing: {reviewer} ({i+1}/{total})"
                 self.lbl_progress_text.config(text=display_text)
                 self.update_idletasks()
                 
                 self.log(f"Processing ({i+1}/{total}): {reviewer}")
                 
-                success = False
-                r_folder = None
-                
-                # BRANCH: Choose method based on Radio Button
-                if mode == "delete" and WIN32COM_AVAILABLE:
-                    success, r_folder = process_delete_rows_com(file_path, reviewer, col_name, out_folder, self.log)
-                else:
-                    success, r_folder = process_hide_rows(file_path, reviewer, col_name, out_folder, self.log)
+                # EXECUTE COM LOGIC
+                success, r_folder = process_reviewer_com(file_path, reviewer, col_name, out_folder, self.log)
 
                 if success and r_folder:
-                    # 1. Auto Copy Word/PDF from source dir
                     base_dir = os.path.dirname(file_path)
                     copy_selected_documents(base_dir, r_folder, self.log)
-                    
-                    # 2. Copy Extra selected files
                     copy_additional_files_list(self.extra_files, r_folder, self.log)
                 
                 self.progress["value"] = i + 1
