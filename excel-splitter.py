@@ -8,9 +8,6 @@ import subprocess
 from datetime import datetime
 
 # --- CONFIGURATION ---
-# Change this path to set where logs are saved.
-# Example: r"C:\MyFolder\Logs"
-# Default: Creates a 'logs' folder where this script is running.
 LOG_ROOT_DIR = os.path.join(os.getcwd(), "logs") 
 
 # GUI Imports
@@ -21,7 +18,6 @@ from tkinter import ttk, filedialog, messagebox, scrolledtext
 try:
     import pandas as pd
 except ImportError:
-    print("Installing pandas...")
     subprocess.check_call([sys.executable, "-m", "pip", "install", "pandas", "openpyxl"])
     import pandas as pd
 
@@ -33,7 +29,6 @@ if platform.system() == 'Windows':
         import pythoncom
         WIN32COM_AVAILABLE = True
     except ImportError:
-        print("⚠️ pywin32 not found. Installing...")
         try:
             subprocess.check_call([sys.executable, "-m", "pip", "install", "pywin32"])
             import win32com.client
@@ -43,7 +38,7 @@ if platform.system() == 'Windows':
             pass
 
 # ==========================================
-# 1. Global Variables & Helper Functions
+# 1. Helper Functions
 # ==========================================
 
 excel_com_instance = None
@@ -57,40 +52,31 @@ def sanitize_folder_name(name: str) -> str:
     return sanitized[:255].rstrip()
 
 def copy_selected_documents(source_dir, dest_dir, logger):
-    """Automatically copies Word and PDF files."""
-    # Copy Word
     for pattern in ["*.docx", "*.doc"]:
         for file in glob.glob(os.path.join(source_dir, pattern)):
             try:
                 shutil.copy2(file, os.path.join(dest_dir, os.path.basename(file)))
                 logger(f"  📎 Copied Word: {os.path.basename(file)}")
-            except Exception as e:
-                logger(f"  ⚠️ Failed to copy Word doc: {e}")
+            except: pass
 
-    # Copy PDF
     for file in glob.glob(os.path.join(source_dir, "*.pdf")):
         try:
             shutil.copy2(file, os.path.join(dest_dir, os.path.basename(file)))
             logger(f"  📎 Copied PDF: {os.path.basename(file)}")
-        except Exception as e:
-            logger(f"  ⚠️ Failed to copy PDF: {e}")
+        except: pass
 
 def copy_additional_files_list(file_paths: list, dest_dir: str, logger):
-    """Copy specific user-selected files to the destination"""
     if not file_paths: return
-    
     for path in file_paths:
         if os.path.exists(path) and os.path.isfile(path):
             try:
                 shutil.copy2(path, os.path.join(dest_dir, os.path.basename(path)))
                 logger(f"  📎 Copied Extra: {os.path.basename(path)}")
             except Exception as e:
-                logger(f"  ❌ Copy Error ({os.path.basename(path)}): {e}")
-        else:
-            logger(f"  ⚠️ File not found: {path}")
+                logger(f"  ❌ Copy Error: {e}")
 
 # ==========================================
-# 2. Excel COM Logic (The Core)
+# 2. Excel COM Logic (Improved)
 # ==========================================
 
 def initialize_excel_com(logger):
@@ -117,17 +103,7 @@ def cleanup_excel_com():
         excel_com_instance = None
 
 def process_reviewer_com(file_path, reviewer, column_name, output_folder, logger):
-    """
-    Strictly uses Windows Excel COM to:
-    1. Open Source
-    2. SaveCopyAs to Destination
-    3. Open Destination
-    4. Filter & Delete Rows
-    """
-    if not WIN32COM_AVAILABLE: 
-        logger("  ❌ Error: Windows Excel COM is not available.")
-        return False, None
-        
+    if not WIN32COM_AVAILABLE: return False, None
     global excel_com_instance
     if not initialize_excel_com(logger): return False, None
     
@@ -145,54 +121,77 @@ def process_reviewer_com(file_path, reviewer, column_name, output_folder, logger
         abs_src = os.path.abspath(file_path)
         abs_dst = os.path.abspath(dst_path)
         
-        # 1. Create a copy using Excel (Preserves EVERYTHING: Formats, Macros, Encryption, etc.)
+        # 1. Create Exact Copy
         wb_source = excel_com_instance.Workbooks.Open(abs_src, ReadOnly=True)
         wb_source.SaveCopyAs(abs_dst)
         wb_source.Close(False)
         
-        # 2. Open the copy to modify data
+        # 2. Open Copy
         wb_dest = excel_com_instance.Workbooks.Open(abs_dst)
         ws = wb_dest.Worksheets(1)
         
-        # 3. Clean slate
         if ws.AutoFilterMode: ws.AutoFilterMode = False
 
-        # 4. Determine Data Range
+        # 3. Find Data Extent
+        # We assume header is in Row 1. If not, this logic needs adjustment.
         last_cell = ws.Cells.SpecialCells(11) # xlCellTypeLastCell
         last_row = last_cell.Row
         last_col = last_cell.Column
         
-        # 5. Find Header Column
+        # 4. Find Header Column Index
         col_idx = None
         for col in range(1, last_col + 1):
-            cell_val = ws.Cells(1, col).Value
-            if str(cell_val).strip() == str(column_name).strip():
+            val = ws.Cells(1, col).Value
+            if str(val).strip() == str(column_name).strip():
                 col_idx = col
                 break
                 
         if not col_idx:
-            logger(f"  ❌ Column '{column_name}' not found in first row.")
+            logger(f"  ❌ Column '{column_name}' not found.")
             wb_dest.Close(False)
             return False, None
-            
-        # 6. Apply Filter (Value <> Reviewer)
-        # We assume Row 1 is header, Data starts at Row 2
-        full_range = ws.Range(ws.Cells(1, 1), ws.Cells(last_row, last_col))
-        full_range.AutoFilter(Field=col_idx, Criteria1=f"<>{reviewer}")
-        
-        # 7. Delete Visible Rows (Offset to skip header)
-        try:
-            # Offset 1 row down, resize to exclude that row
-            data_to_delete = full_range.Offset(1, 0).Resize(last_row - 1, last_col)
-            # Select visible cells only
-            visible_cells = data_to_delete.SpecialCells(12) # xlCellTypeVisible
-            visible_cells.EntireRow.Delete()
-        except Exception as e:
-            # If error is 1004 (No cells found), it means the filter result was empty
-            # (i.e., NO rows matched "<> Reviewer", so everyone is the reviewer).
-            pass 
 
-        # 8. Cleanup
+        # 5. DATA TYPE CHECK (The Fix for 'Not Filtering')
+        # Check the data type of the first data cell (Row 2)
+        # If Excel has Numbers, we must pass a Number to the filter.
+        first_data_val = ws.Cells(2, col_idx).Value
+        criteria_val = reviewer
+
+        if isinstance(first_data_val, (int, float)):
+            try:
+                # Convert the criteria string to number to match Excel
+                criteria_val = float(reviewer)
+                if criteria_val.is_integer():
+                    criteria_val = int(criteria_val)
+            except:
+                pass # Keep as string if conversion fails
+        else:
+            # Force string comparison
+            criteria_val = str(reviewer)
+
+        # 6. Apply Filter
+        # Select from A1 to LastRow/LastCol
+        full_range = ws.Range(ws.Cells(1, 1), ws.Cells(last_row, last_col))
+        
+        # Criteria: <>Reviewer
+        full_range.AutoFilter(Field=col_idx, Criteria1=f"<>{criteria_val}")
+        
+        # 7. Delete Visible Rows
+        # We start from Row 2 (Offset 1) to Last Row
+        try:
+            data_body = full_range.Offset(1, 0).Resize(last_row - 1, last_col)
+            # 12 = xlCellTypeVisible
+            visible_rows = data_body.SpecialCells(12)
+            visible_rows.EntireRow.Delete()
+        except Exception as e:
+            # Error 1004 means "No cells found".
+            # This is actually GOOD here. It means nothing matched "<> Reviewer".
+            # (i.e., Everyone is the reviewer, so nothing needed deleting).
+            # If it's NOT 1004, it's a real error.
+            if "1004" not in str(e):
+                logger(f"  ⚠️ Deletion Warning: {e}")
+
+        # Cleanup
         ws.AutoFilterMode = False
         wb_dest.Save()
         wb_dest.Close()
@@ -202,7 +201,6 @@ def process_reviewer_com(file_path, reviewer, column_name, output_folder, logger
 
     except Exception as e:
         logger(f"  ❌ COM Error: {e}")
-        # Emergency Cleanup
         try: wb_source.Close(False); except: pass
         try: wb_dest.Close(False); except: pass
         return False, None
@@ -217,23 +215,20 @@ class App(tk.Tk):
         self.title("Excel Reviewer Splitter (COM Only)")
         self.geometry("720x750")
         
-        # Variables
         self.file_path_var = tk.StringVar()
         self.col_name_var = tk.StringVar(value="Reviewer")
         self.out_dir_var = tk.StringVar()
         self.extra_files = [] 
         
-        # Initial Check
         if not WIN32COM_AVAILABLE:
-            messagebox.showerror("Missing Requirement", "Windows Excel and 'pywin32' are required for this script.")
+            messagebox.showerror("Error", "Windows Excel Required.")
             self.destroy()
             return
 
         self.create_widgets()
         
     def create_widgets(self):
-        # --- File & Folder Settings ---
-        pnl = ttk.LabelFrame(self, text="File & Folder Settings", padding=10)
+        pnl = ttk.LabelFrame(self, text="File Settings", padding=10)
         pnl.pack(fill="x", padx=10, pady=5)
         
         ttk.Label(pnl, text="Excel File:").grid(row=0, column=0, sticky="w")
@@ -247,8 +242,7 @@ class App(tk.Tk):
         ttk.Entry(pnl, textvariable=self.out_dir_var, width=55).grid(row=2, column=1, padx=5)
         ttk.Button(pnl, text="Browse", command=self.browse_folder).grid(row=2, column=2)
 
-        # --- Additional Files ---
-        pnl_files = ttk.LabelFrame(self, text="Additional Files to Attach (Multiple)", padding=10)
+        pnl_files = ttk.LabelFrame(self, text="Attachments", padding=10)
         pnl_files.pack(fill="x", padx=10, pady=5)
         
         btn_box = ttk.Frame(pnl_files)
@@ -258,52 +252,34 @@ class App(tk.Tk):
         
         list_frame = ttk.Frame(pnl_files)
         list_frame.pack(fill="x")
-        self.lst_files = tk.Listbox(list_frame, height=5, selectmode="extended", activestyle='none')
+        self.lst_files = tk.Listbox(list_frame, height=5)
         self.lst_files.pack(side="left", fill="x", expand=True)
         
-        scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=self.lst_files.yview)
-        scrollbar.pack(side="right", fill="y")
-        self.lst_files.config(yscrollcommand=scrollbar.set)
-
-        # --- Info ---
-        pnl_info = ttk.Frame(self, padding=10)
-        pnl_info.pack(fill="x")
-        ttk.Label(pnl_info, text="ℹ️ Word (.doc/x) and PDF (.pdf) files in source folder are auto-copied.", foreground="gray").pack(anchor="w")
-
-        # --- Run & Progress ---
         btn_frame = ttk.Frame(self)
         btn_frame.pack(pady=10)
-        
         self.btn_run = ttk.Button(btn_frame, text="🚀 Start Processing", command=self.start_thread)
-        self.btn_run.pack(side="left", padx=5)
+        self.btn_run.pack()
 
-        progress_frame = ttk.Frame(self)
-        progress_frame.pack(fill="x", padx=10, pady=5)
-        
-        self.lbl_progress_text = ttk.Label(progress_frame, text="Ready", font=("Arial", 9, "bold"))
-        self.lbl_progress_text.pack(anchor="w", pady=(0, 2))
-        
-        self.progress = ttk.Progressbar(progress_frame, orient="horizontal", mode="determinate")
-        self.progress.pack(fill="x")
+        self.lbl_progress = ttk.Label(self, text="Ready", font=("Arial", 9, "bold"))
+        self.lbl_progress.pack(pady=5)
+        self.progress = ttk.Progressbar(self, orient="horizontal", mode="determinate")
+        self.progress.pack(fill="x", padx=10)
 
-        # --- Log ---
-        ttk.Label(self, text="Execution Log:").pack(anchor="w", padx=10)
         self.log_area = scrolledtext.ScrolledText(self, height=10, state='disabled')
         self.log_area.pack(fill="both", expand=True, padx=10, pady=5)
 
     def browse_file(self):
-        f = filedialog.askopenfilename(filetypes=[("Excel Files", "*.xlsx *.xlsm *.xls")])
+        f = filedialog.askopenfilename()
         if f: 
             self.file_path_var.set(f)
-            parent_dir = os.path.dirname(f)
-            self.out_dir_var.set(parent_dir)
+            self.out_dir_var.set(os.path.dirname(f))
 
     def browse_folder(self):
         d = filedialog.askdirectory()
         if d: self.out_dir_var.set(d)
 
     def add_extra_files(self):
-        files = filedialog.askopenfilenames(title="Select additional files to attach")
+        files = filedialog.askopenfilenames()
         for f in files:
             if f not in self.extra_files:
                 self.extra_files.append(f)
@@ -321,9 +297,7 @@ class App(tk.Tk):
         self.log_area.see(tk.END)
         self.log_area.config(state='disabled')
         if self.log_file_handle:
-            try:
-                self.log_file_handle.write(full_msg + "\n")
-                self.log_file_handle.flush()
+            try: self.log_file_handle.write(full_msg + "\n"); self.log_file_handle.flush()
             except: pass
 
     def start_thread(self):
@@ -336,72 +310,54 @@ class App(tk.Tk):
         col_name = self.col_name_var.get()
         out_folder = self.out_dir_var.get()
         
-        # Setup Logging based on Config Variable
         today_str = datetime.now().strftime("%Y-%m-%d")
         log_dir = os.path.join(LOG_ROOT_DIR, today_str)
         try:
             os.makedirs(log_dir, exist_ok=True)
             log_path = os.path.join(log_dir, f"aer-share-{today_str}.log")
             self.log_file_handle = open(log_path, "a", encoding="utf-8")
-        except:
-            self.log("⚠️ Could not create log file path", "WARN")
+        except: pass
         
-        self.log("🚀 Starting Task (Method: COM/Excel Native)")
-        self.lbl_progress_text.config(text="Initializing...")
+        self.log("🚀 Starting Task (COM Mode)")
         
         try:
-            if not os.path.exists(file_path):
-                self.log("❌ Excel file not found!", "ERROR")
-                return
-
-            # Read unique Reviewers using Pandas (Read-Only safe)
-            # We use openpyxl engine for reading, but NOT writing.
-            try:
-                df = pd.read_excel(file_path) # Let pandas decide engine, usually openpyxl or xlrd
-            except Exception as e:
-                self.log(f"❌ Error reading file list: {e}")
-                return
-
+            if not os.path.exists(file_path): return
+            
+            # Read reviewers
+            df = pd.read_excel(file_path)
             if col_name not in df.columns:
-                self.log(f"❌ Column '{col_name}' not found.", "ERROR")
+                self.log(f"❌ Column '{col_name}' not found.")
                 return
 
             reviewers = df[col_name].dropna().unique().tolist()
             total = len(reviewers)
-            self.log(f"🔎 Found {total} reviewers.")
             
             self.progress["maximum"] = total
             self.progress["value"] = 0
-
-            pythoncom.CoInitialize() # Init thread for COM
+            pythoncom.CoInitialize()
 
             for i, reviewer in enumerate(reviewers):
-                display_text = f"Processing: {reviewer} ({i+1}/{total})"
-                self.lbl_progress_text.config(text=display_text)
-                self.update_idletasks()
+                self.lbl_progress.config(text=f"Processing: {reviewer} ({i+1}/{total})")
+                self.log(f"Processing: {reviewer}")
                 
-                self.log(f"Processing ({i+1}/{total}): {reviewer}")
-                
-                # EXECUTE COM LOGIC
                 success, r_folder = process_reviewer_com(file_path, reviewer, col_name, out_folder, self.log)
 
-                if success and r_folder:
+                if success:
                     base_dir = os.path.dirname(file_path)
                     copy_selected_documents(base_dir, r_folder, self.log)
                     copy_additional_files_list(self.extra_files, r_folder, self.log)
                 
                 self.progress["value"] = i + 1
             
-            self.lbl_progress_text.config(text=f"Done! Processed {total} reviewers.")
-            self.log("🎉 All tasks completed!")
+            self.lbl_progress.config(text="Done!")
+            self.log("🎉 Completed!")
             messagebox.showinfo("Done", "Processing Complete!")
 
         except Exception as e:
-            self.log(f"❌ Critical Error: {e}")
+            self.log(f"❌ Error: {e}")
             messagebox.showerror("Error", str(e))
         finally:
-            if self.log_file_handle:
-                self.log_file_handle.close()
+            if self.log_file_handle: self.log_file_handle.close()
             cleanup_excel_com()
             self.btn_run.config(state="normal")
 
