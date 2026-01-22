@@ -121,90 +121,87 @@ def process_reviewer_com(file_path, reviewer, column_name, output_folder, logger
         abs_src = os.path.abspath(file_path)
         abs_dst = os.path.abspath(dst_path)
         
-        # 1. Create Exact Copy
+        # 1. 先做備份
         wb_source = excel_com_instance.Workbooks.Open(abs_src, ReadOnly=True)
         wb_source.SaveCopyAs(abs_dst)
         wb_source.Close(False)
         
-        # 2. Open Copy
+        # 2. 開啟新檔進行刪減
         wb_dest = excel_com_instance.Workbooks.Open(abs_dst)
         ws = wb_dest.Worksheets(1)
         
-        if ws.AutoFilterMode: ws.AutoFilterMode = False
+        # 強制關閉原本可能存在的篩選
+        if ws.AutoFilterMode:
+            ws.AutoFilterMode = False
 
-        # 3. Find Data Extent
-        # We assume header is in Row 1. If not, this logic needs adjustment.
-        last_cell = ws.Cells.SpecialCells(11) # xlCellTypeLastCell
-        last_row = last_cell.Row
-        last_col = last_cell.Column
+        # 3. 抓取正確的範圍 (UsedRange 最保險)
+        last_row = ws.UsedRange.Rows.Count
+        last_col = ws.UsedRange.Columns.Count
         
-        # 4. Find Header Column Index
-        col_idx = None
+        if last_row < 2:
+            logger(f"  ⚠️ 檔案無資料列，跳過。")
+            wb_dest.Close(True)
+            return True, r_folder
+
+        # 4. 尋找標頭索引
+        col_idx = 0
         for col in range(1, last_col + 1):
-            val = ws.Cells(1, col).Value
-            if str(val).strip() == str(column_name).strip():
+            if str(ws.Cells(1, col).Value).strip() == str(column_name).strip():
                 col_idx = col
                 break
                 
-        if not col_idx:
-            logger(f"  ❌ Column '{column_name}' not found.")
+        if col_idx == 0:
+            logger(f"  ❌ 找不到欄位 '{column_name}'")
             wb_dest.Close(False)
             return False, None
 
-        # 5. DATA TYPE CHECK (The Fix for 'Not Filtering')
-        # Check the data type of the first data cell (Row 2)
-        # If Excel has Numbers, we must pass a Number to the filter.
-        first_data_val = ws.Cells(2, col_idx).Value
-        criteria_val = reviewer
-
-        if isinstance(first_data_val, (int, float)):
+        # 5. 【關鍵 fix】處理篩選條件與型態
+        # 先抓第二列的第一筆資料來判斷這欄是數字還是字串
+        sample_val = ws.Cells(2, col_idx).Value
+        if isinstance(sample_val, (int, float)):
             try:
-                # Convert the criteria string to number to match Excel
-                criteria_val = float(reviewer)
-                if criteria_val.is_integer():
-                    criteria_val = int(criteria_val)
+                # 確保數值比對是一致的
+                criteria_str = f"<>{float(reviewer):.0f}" if float(reviewer).is_integer() else f"<>{float(reviewer)}"
             except:
-                pass # Keep as string if conversion fails
+                criteria_str = f"<>{reviewer}"
         else:
-            # Force string comparison
-            criteria_val = str(reviewer)
+            criteria_str = f"<>{reviewer}"
 
-        # 6. Apply Filter
-        # Select from A1 to LastRow/LastCol
-        full_range = ws.Range(ws.Cells(1, 1), ws.Cells(last_row, last_col))
-        
-        # Criteria: <>Reviewer
-        full_range.AutoFilter(Field=col_idx, Criteria1=f"<>{criteria_val}")
-        
-        # 7. Delete Visible Rows
-        # We start from Row 2 (Offset 1) to Last Row
+        # 6. 【執行篩選】 範圍必須包含 Header (Row 1)
+        data_range = ws.Range(ws.Cells(1, 1), ws.Cells(last_row, last_col))
+        data_range.AutoFilter(Field=col_idx, Criteria1=criteria_str)
+
+        # 7. 【精確刪除】 僅選取除了 Header 以外的資料列
         try:
-            data_body = full_range.Offset(1, 0).Resize(last_row - 1, last_col)
-            # 12 = xlCellTypeVisible
-            visible_rows = data_body.SpecialCells(12)
-            visible_rows.EntireRow.Delete()
+            # 建立純資料範圍 (從 Row 2 開始)
+            body_range = ws.Range(ws.Cells(2, 1), ws.Cells(last_row, last_col))
+            
+            # xlCellTypeVisible = 12
+            # 只針對「顯示出來」(即不等於該審稿人) 的列進行刪除
+            visible_cells = body_range.SpecialCells(12) 
+            if visible_cells:
+                visible_cells.EntireRow.Delete()
+                logger(f"  ✨ 已刪除其他 Reviewer 資料")
         except Exception as e:
-            # Error 1004 means "No cells found".
-            # This is actually GOOD here. It means nothing matched "<> Reviewer".
-            # (i.e., Everyone is the reviewer, so nothing needed deleting).
-            # If it's NOT 1004, it's a real error.
+            # 如果報錯 1004 通常是因為篩選後沒有剩餘列 (代表全部都是該 Reviewer 的資料)
             if "1004" not in str(e):
-                logger(f"  ⚠️ Deletion Warning: {e}")
+                logger(f"  ⚠️ 刪除過程異常: {e}")
 
-        # Cleanup
+        # 8. 收尾
         ws.AutoFilterMode = False
         wb_dest.Save()
         wb_dest.Close()
         
-        logger(f"  ✅ Processed: {os.path.basename(dst_path)}")
+        logger(f"  ✅ 處理完成: {os.path.basename(dst_path)}")
         return True, r_folder
 
     except Exception as e:
-        logger(f"  ❌ COM Error: {e}")
-        try: wb_source.Close(False); except: pass
-        try: wb_dest.Close(False); except: pass
+        logger(f"  ❌ 嚴重錯誤: {e}")
+        try: 
+            wb_dest.Close(False) 
+        except: 
+            pass
         return False, None
-
 # ==========================================
 # 3. GUI Application
 # ==========================================
