@@ -3,6 +3,10 @@
 .venv/
 venv/
 env/
+.venv_new/
+.venv/
+test_data/
+test_data_v2/
 
 # Output
 output/
