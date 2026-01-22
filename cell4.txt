@@ -1,356 +1,237 @@
-# === Cell 5: AER Engine v4.0 (Smart Caching & Reporting) ===
+# === AER - Advanced Enrichment & Reviewer Assignment Logic ===
 import pandas as pd
-import re, time, json, os, requests
+import numpy as np
+import requests
+import re
+import io
 import ipywidgets as widgets
-from datetime import datetime
+from IPython.display import display, clear_output
 from openpyxl import load_workbook
+from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.utils import get_column_letter
-from IPython.display import display, HTML, clear_output
-from io import BytesIO
 
-# ==========================================
-# PART 1: CONFIG & HELPER FUNCTIONS
-# ==========================================
-CACHE_FILE = "aer_cache.json"
-NOTES_FILE = "aer_manual_notes.json"
-CACHE_VERSION = 4.0  # Increment to force invalidation of old cache without rows
-cache_updated = False
-EXCLUDED_FOLDERS = ["forms", "_private", "user listings", "audit logs", "audit"]
+# --- 1. Helper Functions (工具人函式) ---
 
-# --- Loaders ---
-def load_json(file_path):
-    if os.path.exists(file_path):
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f: return json.load(f)
-        except: return {}
-    return {}
+def is_valid_email(s):
+    """簡單的正則表達式判斷是否為 Email"""
+    if not isinstance(s, str): return False
+    regex = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    return re.match(regex, s.strip()) is not None
 
-def save_json(file_path, data):
-    with open(file_path, 'w', encoding='utf-8') as f: json.dump(data, f, indent=2, ensure_ascii=False)
-
-local_cache = load_json(CACHE_FILE)
-manual_data_store = load_json(NOTES_FILE)
-
-# --- Excel Parser (Embedded for standalone execution) ---
-COL_REVIEWER = "Reviewer"
-COL_RESPONSE = "Reviewer's Response"
-COL_DETAILS = "Details of Access change"
-
-def read_excel_rows(excel_bytes: bytes, reviewer_name: str, file_name: str, folder_url: str) -> list[dict]:
-    wb = load_workbook(BytesIO(excel_bytes), read_only=True)
+def detect_columns(df):
+    """
+    不看標題，盲測前兩欄，判斷哪一欄是 Email，哪一欄是 Name。
+    回傳: (email_col_name, name_col_name)
+    """
+    # 取前 10 筆資料來測試
+    sample = df.head(10)
+    col0 = df.columns[0]
+    col1 = df.columns[1]
     
-    # Tab Selection Logic
-    sheet_name = wb.sheetnames[0]
-    for sn in wb.sheetnames:
-        if "user listing" in sn.lower(): sheet_name = sn; break
-    ws = wb[sheet_name]
+    # 計算符合 Email 格式的數量
+    col0_score = sum(1 for x in sample[col0] if is_valid_email(str(x)))
+    col1_score = sum(1 for x in sample[col1] if is_valid_email(str(x)))
     
-    # Header Mapping
-    rows = list(ws.iter_rows(values_only=True))
-    if not rows: return []
-    header = rows[0]
-    col_map = {str(h).strip(): i for i, h in enumerate(header) if h}
+    if col0_score > col1_score:
+        return col0, col1  # 第一欄是 Email，第二欄是 Name
+    else:
+        return col1, col0  # 第二欄是 Email，第一欄是 Name
+
+def normalize_name(name):
+    """將名字轉小寫並移除標點符號，用於模糊比對"""
+    if not isinstance(name, str): return ""
+    return re.sub(r'[^a-zA-Z0-9]', '', name.lower())
+
+def check_name_match(input_name, ad_name):
+    """比對輸入名字與 AD 名字是否大概相符 (防呆檢查)"""
+    n1 = normalize_name(str(input_name))
+    n2 = normalize_name(str(ad_name))
+    # 如果其中一方包含另一方，視為 Match (例如 John Doe vs Doe, John)
+    return (n1 in n2) or (n2 in n1)
+
+# 快取 AD 查詢結果，避免重複打 API
+ad_cache = {}
+
+def fetch_ad_profile(email):
+    """去 Azure AD 查詳細資料"""
+    email = str(email).strip()
+    if not email or not is_valid_email(email): 
+        return {"status": "Invalid Email", "name": "N/A", "dept": "N/A", "active": False}
     
-    idx_rev = col_map.get(COL_REVIEWER)
-    idx_res = col_map.get(COL_RESPONSE)
-    idx_det = col_map.get(COL_DETAILS)
+    if email in ad_cache: return ad_cache[email]
     
-    if idx_rev is None or idx_res is None: return [] # Skip invalid files
-    
-    results = []
-    # Identify hidden rows if possible (read_only doesn't support row_dimensions well, simplified here)
-    # For robust hidden row check, we need read_only=False, but for speed we trust the data mostly.
-    
-    for i, row in enumerate(rows[1:], start=2):
-        r_rev = row[idx_rev] if idx_rev < len(row) else None
-        r_res = row[idx_res] if idx_res < len(row) else None
-        r_det = row[idx_det] if idx_det is not None and idx_det < len(row) else None
-        
-        # Filter by Reviewer Name (Case Insensitive)
-        if str(r_rev).strip().lower() != reviewer_name.lower(): continue
-        
-        is_missing = (r_res is None or str(r_res).strip() == "")
-        
-        results.append({
-            "reviewer": reviewer_name, 
-            "response": r_res, 
-            "details": r_det,
-            "is_missing": is_missing,
-            "row_number": i, 
-            "file_name": file_name, 
-            "folder_url": folder_url
-        })
-    return results
-
-def get_row_stats(txt):
-    txt = str(txt).lower().strip() if txt else ""
-    kw_appr = ['approv', 'retain', 'keep', 'confirm', 'yes', 'ok', 'active']
-    kw_deny = ['denied', 'deny', 'remove', 'delete', 'revok', 'reject', 'no']
-    kw_chg  = ['change', 'modif', 'updat', 'correct', 'edit']
-    return {
-        "is_appr": 1 if any(k in txt for k in kw_appr) else 0,
-        "is_deny": 1 if any(k in txt for k in kw_deny) else 0,
-        "is_chg":  1 if any(k in txt for k in kw_chg) else 0
-    }
-
-# ==========================================
-# PART 2: SCANNING ENGINE
-# ==========================================
-if 'TARGET_APPS' not in globals() or not TARGET_APPS:
-    print("⚠️ Please select Apps in Cell 2 first!")
-    TARGET_APPS = []
-
-all_responses = []
-errors = []
-
-print(f"🚀 Starting Scan Engine v{CACHE_VERSION}...")
-
-for category, current_app_name, current_path in TARGET_APPS:
+    # 呼叫 Graph API (假設 headers 已在前面的 Cell 設定好)
+    url = f"https://graph.microsoft.com/v1.0/users/{email}?$select=id,displayName,department,accountEnabled,mail"
     try:
-        raw_folders = list_folders_with_count(site_id, current_path) if 'list_folders_with_count' in globals() else []
-        # Fallback if cell 2 function missing
-        if not raw_folders: raw_folders = [{"name": "Error", "webUrl": "#"}] 
-        
-        reviewers = [r for r in raw_folders if r['name'].lower() not in EXCLUDED_FOLDERS]
-        logger.info(f"📂 App: {current_app_name} | Reviewers: {len(reviewers)}")
-        
-        for folder in reviewers:
-            reviewer_name = folder["name"]
-            folder_url = folder["webUrl"]
-            folder_path = f"{current_path}/{reviewer_name}"
-            
-            # --- CACHE KEY ---
-            cache_key = f"{category}|{current_app_name}|{reviewer_name}"
-            
-            # 1. List Files
-            try:
-                files = list_excel_files(site_id, folder_path)
-                target_file = None
-                
-                # Smart Match File
-                match_candidates = [f for f in files if reviewer_name.lower() in f["name"].lower()]
-                if not match_candidates: 
-                    # Fallback: Just take the newest file if folder only has one valid excel
-                    if len(files) > 0: target_file = files[0]
-                else:
-                    target_file = match_candidates[0] # Newest is first
-                
-                if not target_file:
-                    raise FileNotFoundError("No Excel file found")
-
-                remote_mod = target_file.get("lastModifiedDateTime")
-                
-                # --- CACHE CHECK (v4.0) ---
-                cached = local_cache.get(cache_key)
-                is_hit = False
-                
-                # Check Version AND Mod Time AND Data Existence
-                if USE_CACHE and cached and cached.get('v') == CACHE_VERSION and cached.get('last_mod') == remote_mod:
-                    if 'rows' in cached and len(cached['rows']) > 0:
-                        is_hit = True
-                        
-                if is_hit:
-                    logger.info(f"  ⏭️ Cache Hit: {reviewer_name}")
-                    # Load rows from JSON, mark as cached
-                    audit_snap = cached.get('audit', {})
-                    for r in cached['rows']:
-                        r_copy = r.copy()
-                        r_copy.update({
-                            "Category": category, "App_Name": current_app_name,
-                            "Last_Modified": remote_mod,
-                            "File_Created_Date": audit_snap.get('created_ts'),
-                            "Audit_Log": audit_snap.get('log'),
-                            "File_Creator": audit_snap.get('creator'),
-                            "File_Modifier": audit_snap.get('modifier'),
-                            "stats_appr": cached['stats']['Appr'], # Optimization: use pre-calc stats
-                            "stats_deny": cached['stats']['Deny'],
-                            "stats_chg": cached['stats']['Chg'],
-                            "source_is_cache": True 
-                        })
-                        all_responses.append(r_copy)
-                    continue # Skip to next reviewer
-
-                # --- DOWNLOAD & PROCESS ---
-                content = download_file(site_id, f"{folder_path}/{target_file['name']}")
-                audit_info = get_file_audit_info(site_id, target_file["id"])
-                
-                rows = read_excel_rows(content, reviewer_name, target_file['name'], folder_url)
-                
-                # Calc Stats
-                s_appr, s_deny, s_chg, miss_cnt = 0, 0, 0, 0
-                clean_rows_for_cache = []
-                
-                final_created = audit_info.get('created_ts') or target_file.get("createdDateTime")
-                
-                for r in rows:
-                    st = get_row_stats(r['response'])
-                    s_appr += st['is_appr']; s_deny += st['is_deny']; s_chg += st['is_chg']
-                    if r['is_missing']: miss_cnt += 1
-                    
-                    # Store minimal data for cache
-                    clean_rows_for_cache.append({
-                        "reviewer": r['reviewer'], "response": r['response'], "details": r['details'],
-                        "is_missing": r['is_missing'], "row_number": r['row_number'], 
-                        "file_name": r['file_name'], "folder_url": r['folder_url']
-                    })
-                    
-                    # Add to current dataframe
-                    r.update({
-                        "Category": category, "App_Name": current_app_name,
-                        "Last_Modified": remote_mod, "File_Created_Date": final_created,
-                        "Audit_Log": audit_info['log'], "File_Creator": audit_info['creator'], "File_Modifier": audit_info['modifier'],
-                        "stats_appr": st['is_appr'], "stats_deny": st['is_deny'], "stats_chg": st['is_chg'],
-                        "source_is_cache": False
-                    })
-                
-                all_responses.extend(rows)
-                logger.info(f"  ✅ Processed: {reviewer_name} (Miss: {miss_cnt})")
-                
-                # Write to Cache (Only if valid rows exist)
-                if rows:
-                    local_cache[cache_key] = {
-                        "v": CACHE_VERSION,
-                        "last_mod": remote_mod,
-                        "stats": {"Appr": s_appr, "Deny": s_deny, "Chg": s_chg},
-                        "audit": audit_info,
-                        "rows": clean_rows_for_cache
-                    }
-                    cache_updated = True
-
-            except Exception as e:
-                logger.error(f"  ❌ Error {reviewer_name}: {e}")
-                errors.append({"Category": category, "App_Name": current_app_name, "reviewer": reviewer_name, "error": str(e), "folder_url": folder_url})
-                
-    except Exception as e:
-        logger.error(f"❌ Critical App Error: {e}")
-
-if cache_updated:
-    save_json(CACHE_FILE, local_cache)
-    logger.info("💾 Cache file updated (v4.0 structure).")
-
-# ==========================================
-# PART 3: DASHBOARD & EXPORT
-# ==========================================
-df = pd.DataFrame(all_responses)
-widget_store = {}
-unified_data = {}
-today_str = datetime.now().strftime("%Y-%m-%d")
-output_dir = f"output/{today_str}"
-os.makedirs(output_dir, exist_ok=True)
-
-# --- Aggregate Data ---
-if not df.empty:
-    stats = df.groupby(["Category", "App_Name", "reviewer"]).agg(
-        missing=("is_missing", "sum"),
-        approved=("stats_appr", "sum"), denied=("stats_deny", "sum"), changed=("stats_chg", "sum"),
-        f_creator=("File_Creator", "first"), f_modifier=("File_Modifier", "first"), audit=("Audit_Log", "first"),
-        is_cached=("source_is_cache", "all") # If all rows are cached
-    ).reset_index()
-
-    for _, row in stats.iterrows():
-        key = f"{row['Category']} > {row['App_Name']}"
-        if key not in unified_data:
-            saved_app = manual_data_store.get(key, {})
-            unified_data[key] = {
-                "Category": row['Category'], "App_Name": row['App_Name'],
-                "status_manual": saved_app.get("app_status", "Calculated"), "note_manual": saved_app.get("app_note", ""),
-                "reviewers": {}, "stats": {"total_users": 0, "completed_users": 0}
+        resp = requests.get(url, headers=headers) # headers 來自全域變數
+        if resp.status_code == 200:
+            data = resp.json()
+            res = {
+                "status": "Found",
+                "name": data.get("displayName", "Unknown"),
+                "dept": data.get("department") or "N/A",
+                "active": data.get("accountEnabled", False)
             }
-        
-        node = unified_data[key]
-        node['stats']['total_users'] += 1
-        is_done = (row['missing'] == 0)
-        if is_done: node['stats']['completed_users'] += 1
-        
-        # Calculate Status String
-        status_calc = f"❌ Pending: {row['missing']}"
-        if is_done:
-            status_calc = "✅ Cached - Completed" if row['is_cached'] else "✅ Completed"
-        
-        d_style = "color:red;font-weight:bold" if row['denied'] > 0 else "color:#555"
-        detail_html = f"Appr:{int(row['approved'])} | <span style='{d_style}'>Deny:{int(row['denied'])}</span> | Chg:{int(row['changed'])}"
-        
-        node['reviewers'][row['reviewer']] = {
-            "status_calc": status_calc, "detail_html": detail_html,
-            "missing_cnt": row['missing'], "is_cached": row['is_cached'],
-            "audit_info": {"creator": row['f_creator'], "modifier": row['f_modifier'], "log": row['audit']},
-            "folder_url": df[(df['App_Name'] == row['App_Name']) & (df['reviewer'] == row['reviewer'])].iloc[0].get('folder_url', '#')
-        }
-
-# --- Dashboard UI ---
-def build_dashboard():
-    container = widgets.VBox()
-    btn_export = widgets.Button(description="💾 Save Reports", button_style='success', icon='file-excel')
-    lbl_out = widgets.Label()
+        else:
+            res = {"status": "Not Found", "name": "N/A", "dept": "N/A", "active": False}
+    except Exception as e:
+        res = {"status": "Error", "name": "Error", "dept": "Error", "active": False}
     
-    app_widgets = []
-    for app_key in sorted(unified_data.keys()):
-        app_data = unified_data[app_key]
-        # Header
-        pct = int((app_data['stats']['completed_users'] / app_data['stats']['total_users'] * 100)) if app_data['stats']['total_users'] > 0 else 0
-        w_lbl = widgets.HTML(f"<b>📂 {app_key}</b> &nbsp; <span style='background:#eee; padding:2px 5px; border-radius:4px'>{pct}% Done</span>", layout=widgets.Layout(width='400px'))
-        w_stat = widgets.Dropdown(options=["Calculated", "Force Completed", "Action Required"], value=app_data['status_manual'], layout=widgets.Layout(width='150px'))
-        
-        widget_store[app_key] = {"data": app_data, "w_stat": w_stat, "revs": {}}
-        
-        # Reviewer Rows
-        rev_rows = []
-        for r_name, r_d in app_data['reviewers'].items():
-            color = "green" if "Completed" in r_d['status_calc'] else "red"
-            w_r = widgets.HTML(f"<span style='color:{color}'>{r_name}</span>", layout=widgets.Layout(width='200px'))
-            w_s = widgets.HTML(f"<i>{r_d['status_calc']}</i>", layout=widgets.Layout(width='200px'))
-            rev_rows.append(widgets.HBox([w_r, w_s]))
-            
-        app_widgets.append(widgets.VBox([widgets.HBox([w_lbl, w_stat]), widgets.VBox(rev_rows, layout=widgets.Layout(margin='5px 0 10px 20px'))]))
+    ad_cache[email] = res
+    return res
 
-    def export(b):
-        b.disabled=True; b.description="Saving..."
-        saved_files = []
-        
-        for app_key, widget_data in widget_store.items():
-            app_name = widget_data['data']['App_Name']
-            category = widget_data['data']['Category']
-            
-            # Get Rows
-            app_rows = df[(df['Category'] == category) & (df['App_Name'] == app_name)].to_dict('records')
-            
-            final_data = []
-            for row in app_rows:
-                # Logic: Populate real data even if cached
-                rev_key = row['reviewer']
-                sys_status = widget_data['data']['reviewers'].get(rev_key, {}).get('status_calc', 'Unknown')
-                
-                # User Requirement: Final Status column shows "Cached"
-                final_status = widget_data['w_stat'].value
-                if final_status == "Calculated":
-                    final_status = sys_status # This already contains "Cached - Completed" from logic above
-                
-                final_data.append({
-                    "Reviewer": rev_key,
-                    "File Name": row.get('file_name'),
-                    "Reviewer Response": row.get('response'), # Real data from cache or file
-                    "Details of Access Change": row.get('details'), # Real data from cache or file
-                    "Final Status": final_status,
-                    "Row Num": row.get('row_number'),
-                    "Audit Creator": row.get('File_Creator'),
-                    "Audit Modifier": row.get('File_Modifier'),
-                    "Full Audit Log": row.get('Audit_Log')
-                })
-            
-            if final_data:
-                safe_name = re.sub(r'[\\/*?:"<>|]', "", app_name)
-                f_name = f"{output_dir}/{safe_name}_{int(time.time())}.xlsx"
-                pd.DataFrame(final_data).to_excel(f_name, index=False)
-                saved_files.append(safe_name)
-        
-        lbl_out.value = f"Saved {len(saved_files)} files to {output_dir}"
-        b.disabled=False; b.description="💾 Save Reports"
+# --- 2. Main Logic UI (主程式) ---
 
-    btn_export.on_click(export)
-    container.children = tuple([widgets.HBox([btn_export, lbl_out])] + app_widgets)
-    display(container)
+w_upload_list = widgets.FileUpload(accept='.xlsx, .csv', description="1. User List")
+w_upload_map = widgets.FileUpload(accept='.csv', description="2. Reviewer Map")
+btn_run = widgets.Button(description="🚀 Process & Generate", button_style='danger')
+out_log = widgets.Output()
 
-if unified_data:
-    build_dashboard()
-else:
-    print("⚠️ No data found.")
+def process_data(b):
+    out_log.clear_output()
+    if not w_upload_list.value or not w_upload_map.value:
+        with out_log: print("❌ 請先上傳兩個檔案 (User List 和 Reviewer Mapping CSV)！")
+        return
+
+    b.disabled = True
+    b.description = "Processing..."
+    
+    try:
+        # --- A. 讀取 Reviewer Mapping File ---
+        map_file = w_upload_map.value[0]
+        df_map = pd.read_csv(io.BytesIO(map_file['content']))
+        
+        # 建立快速查找字典 (轉小寫以防大小寫差異)
+        # 假設 CSV 標題固定為: "email address", "department", "reviewer"
+        # 清理欄位名稱 (移除多餘空白)
+        df_map.columns = [c.strip().lower() for c in df_map.columns]
+        
+        # 建立兩個 Lookup Table
+        # 1. Email 直接對應
+        email_map = dict(zip(df_map['email address'].str.lower().str.strip(), df_map['reviewer']))
+        # 2. 部門對應
+        dept_map = dict(zip(df_map['department'].str.lower().str.strip(), df_map['reviewer']))
+        
+        with out_log: print(f"✅ Mapping Loaded: {len(email_map)} User Rules, {len(dept_map)} Dept Rules.")
+
+        # --- B. 讀取 User List & 判斷欄位 ---
+        list_file = w_upload_list.value[0]
+        fname = list_file['name']
+        if fname.endswith('.csv'): df_user = pd.read_csv(io.BytesIO(list_file['content']))
+        else: df_user = pd.read_excel(io.BytesIO(list_file['content']))
+        
+        # 智慧判斷欄位 (不看標題，看內容)
+        col_email, col_name = detect_columns(df_user)
+        with out_log: print(f"🔍 Detected Columns - Email: '{col_email}', Name: '{col_name}'")
+
+        # --- C. 資料處理迴圈 ---
+        processed_rows = []
+        prog = widgets.IntProgress(min=0, max=len(df_user), description='Enriching:')
+        display(prog)
+        
+        for idx, row in df_user.iterrows():
+            raw_email = str(row[col_email]).strip()
+            raw_name = str(row[col_name]).strip()
+            
+            # 1. 查詢 AD
+            ad_info = fetch_ad_profile(raw_email)
+            
+            # 2. 判斷 Active
+            is_active_str = "Active" if ad_info['active'] else "Inactive"
+            if ad_info['status'] == "Not Found": is_active_str = "User Not Found"
+            
+            # 3. 判斷 Name Match
+            is_match = check_name_match(raw_name, ad_info['name'])
+            match_str = "Yes" if is_match else "Typo/Mismatch"
+            if ad_info['status'] != "Found": match_str = "N/A"
+            
+            # 4. 指派 Reviewer (核心邏輯)
+            assigned_reviewer = ""
+            # 優先權 1: 檢查 Email Mapping
+            if raw_email.lower() in email_map:
+                assigned_reviewer = email_map[raw_email.lower()]
+            # 優先權 2: 檢查 部門 Mapping (使用 AD 抓回來的部門)
+            elif ad_info['dept'].lower().strip() in dept_map:
+                assigned_reviewer = dept_map[ad_info['dept'].lower().strip()]
+            # 優先權 3: 空值
+            else:
+                assigned_reviewer = "" # No Match Found
+
+            # 5. 組合新資料
+            # 複製原始資料
+            new_row = row.to_dict()
+            # 加上新欄位
+            new_row.update({
+                "user_name": ad_info['name'],
+                "user_email": raw_email, # 確保有一欄標準的 key
+                "is_match": match_str,
+                "is_active": is_active_str,
+                "department": ad_info['dept'],
+                "Reviewer": assigned_reviewer,
+                "Reviewer's Response": "",      # 留白給下拉選單
+                "Details of Access Change": ""  # 留白
+            })
+            processed_rows.append(new_row)
+            prog.value += 1
+            
+        # --- D. 產出 Excel & 增加下拉選單 ---
+        df_final = pd.DataFrame(processed_rows)
+        
+        # 定義最後輸出的欄位順序 (原始欄位 + 新增欄位)
+        # 排除 user_email 重複顯示 (如果原始欄位已經有了)，這裡強制放在後面方便看
+        final_cols = list(df_user.columns) + [
+            "user_name", "is_match", "is_active", "department", 
+            "Reviewer", "Reviewer's Response", "Details of Access Change"
+        ]
+        # 去除重複欄位 (如果 user_email 名字衝突)
+        final_cols = list(dict.fromkeys(final_cols))
+        
+        df_export = df_final[final_cols]
+        output_path = "output/Enhanced_Review_List.xlsx"
+        df_export.to_excel(output_path, index=False)
+        
+        # 使用 OpenPyXL 加上下拉選單
+        wb = load_workbook(output_path)
+        ws = wb.active
+        
+        # 找到 "Reviewer's Response" 是第幾欄 (1-based index)
+        target_col_idx = None
+        for col_idx, cell in enumerate(ws[1], 1):
+            if cell.value == "Reviewer's Response":
+                target_col_idx = col_idx
+                break
+        
+        if target_col_idx:
+            # 建立資料驗證物件 (Dropdown)
+            dv = DataValidation(type="list", formula1='"Approved,Denied,Change Required"', allow_blank=True)
+            dv.error = 'Your entry is not in the list'
+            dv.errorTitle = 'Invalid Entry'
+            dv.prompt = 'Please select your responses from the drop-down menu'
+            dv.promptTitle = 'Action Required'
+            
+            # 套用到該欄位的所有資料列 (從第2列到最後)
+            col_letter = get_column_letter(target_col_idx)
+            dv.add(f'{col_letter}2:{col_letter}{len(df_export)+1}')
+            ws.add_data_validation(dv)
+            
+            wb.save(output_path)
+        
+        with out_log:
+            print("\n🎉 Success! Process Completed.")
+            print(f"📂 Output File: {output_path}")
+            display(df_export.head())
+
+    except Exception as e:
+        with out_log: print(f"❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    b.disabled = False
+    b.description = "🚀 Process & Generate"
+
+btn_run.on_click(process_data)
+display(widgets.VBox([
+    widgets.HTML("<h3>🕵️‍♂️ AER - Smart Review List Generator</h3>"),
+    widgets.HTML("<p>邏輯：自動偵測 Email/Name -> 查 AD 狀態 -> 比對名字 -> 依照 <b>User > Dept</b> 順序指派 Reviewer。</p>"),
+    w_upload_list, w_upload_map, btn_run, out_log
+]))
