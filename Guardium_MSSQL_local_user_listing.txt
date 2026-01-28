@@ -1,19 +1,32 @@
-SELECT
-    name AS Account_Name,
-    type_desc AS Account_Type,
-    CASE is_disabled
-        WHEN 1 THEN 'Disabled'
-        WHEN 0 THEN 'Enabled'
-    END AS Status
-FROM
-    sys.server_principals
+) SQL statement（回傳數字）
+（回傳 1 個整數）
+
+sql
+SELECT COUNT(*)
+FROM sys.server_principals
 WHERE
     type = 'S'
     OR (
-        type IN ('U', 'G')
+        type IN ('U','G')
         AND (
-            name LIKE CAST(SERVERPROPERTY('MachineName') AS NVARCHAR) + '\%'
-            OR name LIKE 'NT AUTHORITY\%'
-            OR name LIKE 'BUILTIN\%'
+            name LIKE CAST(SERVERPROPERTY('MachineName') AS NVARCHAR(128)) + '\%'
         )
+    );
+2) SQL Statement for Detail（回傳「一欄、多列」字串）
+（每列一個字串，Guardium 會組成 detail string）
+​
+
+sql
+SELECT
+    CONCAT(
+        name, ' | ', type_desc, ' | ',
+        CASE is_disabled WHEN 1 THEN 'Disabled' ELSE 'Enabled' END
+    ) AS detail_item
+FROM sys.server_principals
+WHERE
+    type = 'S'
+    OR (
+        type IN ('U','G')
+        AND (name LIKE CAST(SERVERPROPERTY('MachineName') AS NVARCHAR(128)) + '\%')
     )
+ORDER BY type_desc, name;
