@@ -1,4 +1,3 @@
-sql
 SELECT COUNT(*)
 FROM sys.server_principals sp
 WHERE
@@ -11,9 +10,16 @@ OR
   sp.type IN ('U','G')
   AND sp.name LIKE CAST(SERVERPROPERTY('MachineName') AS nvarchar(128)) + '\%'
 );
- 
-SELECT sp.name + ' | ' + sp.type_desc + ' | ' +
-       CASE WHEN sp.is_disabled = 1 THEN 'Disabled' ELSE 'Enabled' END
+
+
+
+
+
+
+SELECT CONCAT(
+  sp.name, ' | ', sp.type_desc, ' | ',
+  CASE WHEN sp.is_disabled = 1 THEN 'Disabled' ELSE 'Enabled' END
+)
 FROM sys.server_principals sp
 WHERE
 (
