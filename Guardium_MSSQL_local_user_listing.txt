@@ -8,15 +8,12 @@ SELECT
 FROM
     sys.server_principals
 WHERE
-
     type = 'S'
-
     OR (
-        type IN ('U', 'G') -- Windows User or Group
+        type IN ('U', 'G')
         AND (
             name LIKE CAST(SERVERPROPERTY('MachineName') AS NVARCHAR) + '\%'
             OR name LIKE 'NT AUTHORITY\%'
             OR name LIKE 'BUILTIN\%'
         )
     )
-ORDER BY type_desc, name;
