@@ -1,22 +1,51 @@
-# === Cell 2: UI Components & Logic (Cleaned) ===
+# === Cell 2: UI Components & Logic (Fixed with Mock) ===
 import pandas as pd
 import ipywidgets as widgets
 import io
 import os
 import glob
+import random
 from concurrent.futures import ThreadPoolExecutor
 from IPython.display import display, HTML
 from openpyxl import load_workbook
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.utils import get_column_letter
 
-# Re-initializing widgets to ensure they are fresh
+# --- 1. 定義路徑與環境變數 (模擬 Cell 1 的部分設定) ---
+today = pd.Timestamp.now().strftime('%Y-%m-%d')
+BASE_DIR = os.path.join("output", today, "create")
+MAPPING_DIR = os.path.join("input", "mapping")
+os.makedirs(BASE_DIR, exist_ok=True) # 確保輸出的資料夾存在
+
+# --- 2. 補上 fetch_ad_profile (Mock) 防止報錯 ---
+try:
+    # 嘗試檢查 Cell 1 是否有定義這個函式
+    fetch_ad_profile("test@test.com")
+except (NameError, TypeError, Exception):
+    print("⚠️ 檢測到沒有執行 Cell 1，啟用模擬模式 (Mock Mode)")
+    
+    def fetch_ad_profile(email):
+        # 這裡模擬 Azure AD 的回傳結果，方便你測試排序邏輯
+        email = str(email).strip().lower()
+        # 隨機產生三種狀態，測試你的排序邏輯是否正確
+        # 測試時，你可以把 email 設為種子，讓結果固定
+        seed = len(email) 
+        if seed % 3 == 0:
+            # 活人
+            return {"email": email, "status": "Found", "dept": "Sales - Branch A", "active": True, "last_seen": "2024-01-29"}
+        elif seed % 3 == 1:
+            # 死人 (Inactive)
+            return {"email": email, "status": "Found", "dept": "HR - Main", "active": False, "last_seen": "2023-05-20"}
+        else:
+            # 幽靈 (No Record)
+            return {"email": email, "status": "Not Found", "dept": "N/A", "active": "N/A", "last_seen": "no AD record"}
+
+# --- 3. UI 初始化 ---
 up_list = widgets.FileUpload(accept='.xlsx, .csv', description="1. User List", button_style='info')
 txt_list = widgets.HTML(value="<i>No file selected</i>", layout=widgets.Layout(margin='0 10px'))
 up_map = widgets.FileUpload(accept='.csv', description="2. Reviewer Map", button_style='info')
 
 def get_latest_map():
-    # Helper to find latest map in input folder (if exists)
     if os.path.exists(MAPPING_DIR):
         files = glob.glob(os.path.join(MAPPING_DIR, "*.csv"))
         return max(files, key=os.path.getmtime) if files else None
@@ -38,14 +67,13 @@ btn_process = widgets.Button(description="🚀 Step 1: Analyze", button_style='w
 btn_save = widgets.Button(description="💾 Step 2: Save", button_style='success', layout=widgets.Layout(width='180px'), disabled=True)
 out_area = widgets.Output()
 
-# Global variables for state
+# Global variables
 review_registry = []
 processed_df = None
 current_fname = ""
 mapping_data = {}
 
 def is_valid_reviewer(val):
-    """Check if the reviewer name looks valid (not NaN, empty, or placeholder)"""
     s = str(val).strip().lower()
     invalid_keywords = ["nan", "none", "", "()", "null", "0"]
     return s not in invalid_keywords
@@ -62,7 +90,6 @@ def do_process(b):
     b.disabled = True
     try:
         # 1. Load Map
-        # Determine source: Uploaded file > Default path
         if up_map.value:
             m_src = io.BytesIO(up_map.value[0]['content'])
         elif map_path:
@@ -73,27 +100,18 @@ def do_process(b):
             return
 
         df_m = pd.read_csv(m_src)
-        # Normalize columns
         df_m.columns = [str(c).strip().lower() for c in df_m.columns]
         
-        # Ensure required columns exist
         for req in ['email address', 'department', 'reviewer', 'branch']:
-            if req not in df_m.columns:
-                df_m[req] = ""
+            if req not in df_m.columns: df_m[req] = ""
         df_m = df_m.fillna("")
 
-        # Create Lookup Dictionaries
-        # map_by_email: {email: reviewer_name}
         map_by_email = {str(k).strip().lower(): str(v).strip() for k, v in zip(df_m['email address'], df_m['reviewer']) if str(k).strip()}
-        # map_by_dept: {dept: reviewer_name}
         map_by_dept = {str(k).strip().lower(): str(v).strip() for k, v in zip(df_m['department'], df_m['reviewer'])}
         
-        # UI Options
         all_options = sorted([(str(d), str(d).lower().strip()) for d in df_m['department'].unique() if str(d).strip()])
         branch_opts = [o for o in all_options if "branch" in o[0].lower()]
         dept_opts = [o for o in all_options if "branch" not in o[0].lower()]
-        
-        # Store for dropdown callbacks
         mapping_data['depts'] = map_by_dept
 
         # 2. Load User List
@@ -104,76 +122,55 @@ def do_process(b):
         else:
             df_u = pd.read_excel(io.BytesIO(f_item['content']))
         
-        # Detect Email Column
         col_email = df_u.columns[0]
         for i in range(min(2, len(df_u.columns))):
             if "@" in str(df_u.iloc[0, i]): 
-                col_email = df_u.columns[i]
-                break
+                col_email = df_u.columns[i]; break
 
-        # 3. Parallel Fetch AD Info
+        # 3. Parallel Fetch AD Info (Uses real or mock function)
         emails = df_u[col_email].dropna().unique().tolist()
-        with out_area: print(f"Connecting to AD for {len(emails)} users...")
+        with out_area: print(f"Connecting to AD (or Mock) for {len(emails)} users...")
         with ThreadPoolExecutor(max_workers=10) as ex:
-            # Assumes fetch_ad_profile is defined in Cell 1
             ad_results = {r['email']: r for r in list(ex.map(fetch_ad_profile, emails))}
 
-        # 4. Row Processing Logic
+        # 4. Row Processing
         final_rows = []
-        problem_rows_data = [] # Temporary list for sorting
+        problem_rows_data = []
 
         for idx, row in df_u.iterrows():
             raw_email = str(row[col_email]).strip().lower()
             ad = ad_results.get(raw_email, {"dept": "N/A", "active": "N/A", "last_seen": "no record", "status": "Not Found"})
-            
             clean_dept = str(ad['dept']).split(" - ")[-1].strip().lower()
 
             reviewer = ""
             is_manual_case = False
             
-            # --- LOGIC START ---
-            
-            # Priority 1: Check by Email
+            # Priority 1: Email Check
             if raw_email in map_by_email:
                 direct_reviewer = map_by_email[raw_email]
                 if is_valid_reviewer(direct_reviewer):
                     reviewer = direct_reviewer
                 else:
-                    # Found in map, but reviewer name is invalid -> Manual Assign
                     reviewer = "Dept head: manual assign"
                     is_manual_case = True
             
-            # Priority 2: Check by Department (only if not yet assigned/decided)
+            # Priority 2: Dept Check
             if not reviewer and not is_manual_case:
                 reviewer = map_by_dept.get(clean_dept, "")
             
-            # Validate Reviewer
-            is_problem = False
-            if not is_valid_reviewer(reviewer):
-                is_problem = True
-            
-            # Force problem flow if it's a specific manual case
-            if is_manual_case:
-                is_problem = True
-            # --- LOGIC END ---
+            is_problem = not is_valid_reviewer(reviewer)
+            if is_manual_case: is_problem = True
 
             if is_problem:
-                # Sort Priority: Active (0) -> No Record (1) -> Inactive (2)
+                # Sort: Active(0) -> NoRecord(1) -> Inactive(2)
                 sort_val = 3
-                if ad['active'] is True: 
-                    sort_val = 0
-                elif ad['last_seen'] == "no AD record" or ad.get('status') == "Not Found": 
-                    sort_val = 1
-                elif ad['active'] is False: 
-                    sort_val = 2
+                if ad['active'] is True: sort_val = 0
+                elif ad['last_seen'] == "no AD record" or ad.get('status') == "Not Found": sort_val = 1
+                elif ad['active'] is False: sort_val = 2
                 
                 problem_rows_data.append({
-                    'index': idx,
-                    'email': raw_email,
-                    'ad': ad,
-                    'clean_dept': clean_dept,
-                    'sort_val': sort_val,
-                    'pre_filled_rev': reviewer if is_manual_case else ""
+                    'index': idx, 'email': raw_email, 'ad': ad, 'clean_dept': clean_dept,
+                    'sort_val': sort_val, 'pre_filled_rev': reviewer if is_manual_case else ""
                 })
 
             new_row = row.to_dict()
@@ -181,8 +178,7 @@ def do_process(b):
             new_row.update({"Reviewer": final_rev_val, "Reviewer's Response": "", "Details of Access Changes": ""})
             final_rows.append(new_row)
 
-        # 5. Build Widget UI (Sorted)
-        # Sort keys: Active -> NoRecord -> Inactive
+        # 5. Build Widget UI
         problem_rows_data.sort(key=lambda x: x['sort_val'])
         
         widget_rows = []
@@ -192,17 +188,13 @@ def do_process(b):
             
             status_html = ""
             should_remove = False
-            
             if ad['active'] is True:
                 status_html = "<span style='color: orange; font-weight: bold;'>act: True (Attention)</span>"
             elif ad['active'] is False:
                 status_html = f"<span>act: False (last: {ad['last_seen']})</span>"
                 should_remove = True
-            elif ad['last_seen'] == "no AD record" or ad.get('status') == "Not Found":
-                status_html = "<span style='color: red; font-weight: bold;'>act: N/A (no AD record)</span>"
-                should_remove = True
             else:
-                status_html = f"<span>act: N/A ({ad['last_seen']})</span>"
+                status_html = "<span style='color: red; font-weight: bold;'>act: N/A (no AD record)</span>"
                 should_remove = True
 
             chk_rem = widgets.Checkbox(value=should_remove, layout=widgets.Layout(width='60px'))
@@ -210,25 +202,16 @@ def do_process(b):
             
             curr_opts = branch_opts if chk_br.value else dept_opts
             drp = widgets.Dropdown(options=curr_opts, value=None, layout=widgets.Layout(width='200px'))
-            
-            # Show "Dept head: manual assign" or "Unassigned"
-            lbl_val = p['pre_filled_rev'] if p['pre_filled_rev'] else "Unassigned"
-            lbl_rev = widgets.Label(value=lbl_val, layout=widgets.Layout(width='140px'))
+            lbl_rev = widgets.Label(value=p['pre_filled_rev'] or "Unassigned", layout=widgets.Layout(width='140px'))
 
-            # Callbacks
-            def update_drp(change, d=drp):
-                d.options = branch_opts if change['new'] else dept_opts
+            def update_drp(change, d=drp): d.options = branch_opts if change['new'] else dept_opts
             chk_br.observe(update_drp, names='value')
-            
-            def update_lbl(change, l=lbl_rev): 
-                l.value = str(mapping_data['depts'].get(change['new'], "Manual"))
+            def update_lbl(change, l=lbl_rev): l.value = str(mapping_data['depts'].get(change['new'], "Manual"))
             drp.observe(update_lbl, names='value')
             
             review_registry.append({'index': idx, 'chk': chk_rem, 'drp': drp, 'lbl': lbl_rev})
-            
             widget_rows.append(widgets.HBox([
-                chk_rem, 
-                widgets.Label(value=p['email'], layout=widgets.Layout(width='220px')),
+                chk_rem, widgets.Label(value=p['email'], layout=widgets.Layout(width='220px')),
                 widgets.HTML(value=status_html, layout=widgets.Layout(width='250px')),
                 chk_br, drp, lbl_rev
             ], layout=widgets.Layout(border='bottom 1px solid #ddd')))
@@ -242,17 +225,15 @@ def do_process(b):
                 header = widgets.HBox([
                     widgets.Label("REMOVE", layout=widgets.Layout(width='60px')), 
                     widgets.Label("EMAIL", layout=widgets.Layout(width='220px')), 
-                    widgets.Label("AD STATUS / LAST LOGIN", layout=widgets.Layout(width='250px')), 
+                    widgets.Label("AD STATUS", layout=widgets.Layout(width='250px')), 
                     widgets.Label("BRANCH?", layout=widgets.Layout(width='70px')),
-                    widgets.Label("ASSIGN DEPT/BRANCH", layout=widgets.Layout(width='200px')),
+                    widgets.Label("ASSIGN DEPT", layout=widgets.Layout(width='200px')),
                     widgets.Label("REVIEWER", layout=widgets.Layout(width='140px'))
                 ])
                 display(widgets.VBox([header] + widget_rows))
             else: print("All records matched successfully.")
     except Exception as e:
         with out_area: print(f"Error: {str(e)}")
-        # Assuming logger is defined in Cell 1
-        # logger.error("Analysis error", exc_info=True)
     finally: b.disabled = False
 
 def do_save(b):
@@ -262,29 +243,19 @@ def do_save(b):
         df_final = processed_df.copy()
         to_drop = []
         for item in review_registry:
-            if item['chk'].value: 
-                to_drop.append(item['index'])
-            else:
-                # Logic: If user picked a dropdown, use that reviewer.
-                # If they didn't, we keep whatever was there. 
-                # If it was "Dept head: manual assign", it stays unless they picked a dept.
-                if item['drp'].value is not None:
-                     df_final.at[item['index'], 'Reviewer'] = item['lbl'].value
+            if item['chk'].value: to_drop.append(item['index'])
+            elif item['drp'].value is not None: df_final.at[item['index'], 'Reviewer'] = item['lbl'].value
         
         df_final = df_final.drop(to_drop)
         fpath = os.path.join(BASE_DIR, current_fname.split('.')[0] + ".xlsx")
         df_final.to_excel(fpath, index=False)
         
-        # Excel Data Validation
         wb = load_workbook(fpath)
         ws = wb.active
         col_resp = next((i for i, c in enumerate(ws[1], 1) if c.value == "Reviewer's Response"), None)
         if col_resp:
             dv = DataValidation(type="list", formula1='"Approved,Denied,Changes Required"', allow_blank=True)
-            dv.promptTitle, dv.prompt = "Selection", "Please select your responses from the drop-down menu"
-            dv.errorTitle, dv.error = "Error", "Please select a valid option form the drop-down menu"
-            letter = get_column_letter(col_resp)
-            dv.add(f"{letter}2:{letter}{len(df_final)+1}")
+            dv.add(f"{get_column_letter(col_resp)}2:{get_column_letter(col_resp)}{len(df_final)+1}")
             ws.add_data_validation(dv)
         wb.save(fpath)
         with out_area: display(HTML(f"<b style='color:blue;'>Process Complete. Saved to: {fpath}</b>"))
