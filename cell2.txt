@@ -1,4 +1,4 @@
-# === Cell 2: UI & Processing Logic (v5.9 Fix) ===
+# === Cell 2: UI & Processing Logic (v5.10 Fix) ===
 
 # --- 1. UI Styling ---
 style_html = """
@@ -41,12 +41,28 @@ up_list.observe(on_list_file_change, 'value')
 map_path = get_latest_map()
 txt_map = widgets.HTML(value=f"<b style='color:green;'>✅ Default: {os.path.basename(map_path)}</b>" if map_path else "<i>No map found</i>", layout=widgets.Layout(margin='0 10px'))
 
-def detect_columns(df, keywords):
-    """Finds a column containing any of the keywords"""
-    cols = [str(c).lower().strip() for c in df.columns]
-    for k in keywords:
-        for i, c in enumerate(cols):
-            if k in c: return df.columns[i]
+def smart_detect_column(df, candidates, avoid_terms=[]):
+    """
+    Tries to find the best column match.
+    1. Look for exact matches.
+    2. Look for partial matches (but avoid terms like 'Manager' if looking for 'Dept').
+    """
+    cols = [str(c).strip() for c in df.columns]
+    cols_lower = [c.lower() for c in cols]
+    
+    # 1. Exact Match Strategy
+    for cand in candidates:
+        if cand in cols_lower:
+            return df.columns[cols_lower.index(cand)]
+            
+    # 2. Contains Strategy (Strict)
+    for cand in candidates:
+        for i, c_low in enumerate(cols_lower):
+            if cand in c_low:
+                # If we find "Department", make sure it's not "Department Head" if we can help it
+                if avoid_terms and any(bad in c_low for bad in avoid_terms):
+                    continue
+                return df.columns[i]
     return None
 
 # --- 4. Logic: Analysis ---
@@ -69,40 +85,38 @@ def do_process(b):
             
         df_m = pd.read_csv(m_src)
         
-        # Smart Column Detection
-        col_m_email = detect_columns(df_m, ["email", "mail"])
-        col_m_dept = detect_columns(df_m, ["department", "dept", "function"])
-        col_m_rev = detect_columns(df_m, ["reviewer", "owner", "manager"])
+        # Improved Column Detection
+        col_m_email = smart_detect_column(df_m, ["email address", "email", "mail"], avoid_terms=["manager", "reviewer"])
+        col_m_dept = smart_detect_column(df_m, ["department", "dept", "function"], avoid_terms=["head", "manager", "lead"])
+        col_m_rev = smart_detect_column(df_m, ["reviewer", "owner", "manager", "name"])
         
         if not col_m_rev or not col_m_dept:
-            with out_area: print(f"Error: Could not find 'Department' or 'Reviewer' columns in map. Found: {list(df_m.columns)}")
+            with out_area: print(f"Error: Could not identify columns. Found: {list(df_m.columns)}")
             return
 
-        # Build Lookups
+        logger.info(f"Mapping Cols Detected -> Dept: '{col_m_dept}' | Reviewer: '{col_m_rev}'")
+
+        # Build Lookups (Mimic v5.3: astype(str).str.lower().str.strip())
         mapping_data['emails'] = {}
         if col_m_email:
-            mapping_data['emails'] = {str(k).strip().lower(): v for k, v in zip(df_m[col_m_email], df_m[col_m_rev])}
+            mapping_data['emails'] = dict(zip(df_m[col_m_email].astype(str).str.lower().str.strip(), df_m[col_m_rev]))
             
-        mapping_data['depts'] = {str(k).strip().lower(): v for k, v in zip(df_m[col_m_dept], df_m[col_m_rev])}
+        # Dept Lookup
+        mapping_data['depts'] = dict(zip(df_m[col_m_dept].astype(str).str.lower().str.strip(), df_m[col_m_rev]))
         
         # UI Lists
         raw_depts = sorted([str(d).strip() for d in df_m[col_m_dept].unique()])
         mapping_data['all_branches'] = [("Select Branch...", "")] + [(d, d.lower()) for d in raw_depts if "branch" in d.lower()]
         mapping_data['all_depts'] = [("Select Dept...", "")] + [(d, d.lower()) for d in raw_depts if "branch" not in d.lower()]
-        
-        logger.info(f"Mapping Loaded: {len(mapping_data['emails'])} emails, {len(raw_depts)} depts mapped.")
 
         # B. Load User List
         f_item = up_list.value[0]
         current_fname = f_item['name']
         df_u = pd.read_csv(io.BytesIO(f_item['content'])) if current_fname.endswith('.csv') else pd.read_excel(io.BytesIO(f_item['content']))
         
-        # Smart User List Email Detection
-        col_email = detect_columns(df_u, ["email", "mail", "user principal", "upn"])
-        if not col_email: col_email = df_u.columns[0] # Fallback
+        col_email = smart_detect_column(df_u, ["email", "mail", "user principal", "upn"])
+        if not col_email: col_email = df_u.columns[0]
         
-        logger.info(f"User List Loaded: {len(df_u)} rows. Using Email Col: {col_email}")
-
         # C. AD Fetch
         emails = df_u[col_email].dropna().unique().tolist()
         with out_area: print(f"Syncing {len(emails)} emails with AD...")
@@ -129,26 +143,32 @@ def do_process(b):
             raw_email = str(row[col_email]).strip().lower()
             ad = ad_results.get(raw_email, {"status": "Not Found", "dept": "N/A", "active": "N/A", "last_login": None})
             
-            # === MATCHING LOGIC FIX ===
-            # 1. Try Direct Email Match
+            # === LOGIC FROM v5.3 RESTORED ===
+            # 1. Clean the AD Department string exactly like v5.3
+            ad_dept_raw = str(ad['dept'])
+            if " - " in ad_dept_raw:
+                clean_dept = ad_dept_raw.split(" - ")[-1].strip().lower()
+            else:
+                clean_dept = ad_dept_raw.strip().lower()
+                
+            # 2. Matching Priority
+            # First try Email Map
             reviewer = mapping_data['emails'].get(raw_email)
             
-            # 2. Try Dept Match (Hybrid)
-            if not reviewer and ad['dept'] != "N/A":
-                raw_dept = str(ad['dept']).strip().lower()
-                clean_dept = raw_dept.split(" - ")[-1].strip() # Handle "Code - Name"
+            # Second try Dept Map (Cleaned)
+            if not reviewer:
+                reviewer = mapping_data['depts'].get(clean_dept)
                 
-                # Check FULL name first, then check SHORT name
-                reviewer = mapping_data['depts'].get(raw_dept) or mapping_data['depts'].get(clean_dept)
-                
-                # Debug logging for the first 3 failures
-                if not reviewer and len(debug_logs) < 3:
-                    debug_logs.append(f"Fail: Email='{raw_email}' | AD Dept='{raw_dept}' | Clean Dept='{clean_dept}'")
+            # Third try Dept Map (Raw) - Just in case map has "001 - IT"
+            if not reviewer:
+                 reviewer = mapping_data['depts'].get(ad_dept_raw.strip().lower())
+            
+            # === END RESTORED LOGIC ===
 
-            # 3. Validation
-            is_problem = not reviewer or str(reviewer).strip().lower() in ["nan", "none", "", "()"]
+            is_problem = not reviewer or str(reviewer).strip().lower() in ["nan", "none", "", "()", "null"]
             
             if is_problem:
+                if len(debug_logs) < 3: debug_logs.append(f"Fail: {raw_email} | AD Dept: {ad['dept']} | Clean: {clean_dept}")
                 reviewer = "(please manual review)"
                 
                 # Colors & Widgets
@@ -211,7 +231,6 @@ def do_process(b):
             if debug_logs:
                 print("--- DEBUG: Sample Mapping Failures ---")
                 for l in debug_logs: print(l)
-                print("--------------------------------------")
             
             if widget_rows:
                 display(widgets.VBox([header_box] + widget_rows, layout=widgets.Layout(width='100%')))
@@ -270,7 +289,7 @@ btn_process.on_click(do_process)
 btn_save.on_click(do_save)
 
 ui = widgets.VBox([
-    widgets.HTML("<h4>🛡️ AER Generator v5.9 (Interactive)</h4>"), 
+    widgets.HTML("<h4>🛡️ AER Generator v5.10 (Fix)</h4>"), 
     widgets.HBox([up_list, txt_list]), 
     widgets.HBox([up_map, txt_map]), 
     widgets.HBox([btn_process, btn_save], layout=widgets.Layout(margin='15px 0')), 
