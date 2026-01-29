@@ -1,4 +1,4 @@
-# === Cell 2: UI & Processing Logic (v6.1 - Smart Column Swapping) ===
+# === Cell 2: UI & Processing Logic (v6.2 - Strict Matching) ===
 
 # --- 1. UI Styling ---
 style_html = """
@@ -40,30 +40,17 @@ txt_map = widgets.HTML(value=f"<b style='color:green;'>✅ Default: {os.path.bas
 
 def identify_columns_smart(df):
     """
-    Scans Col 0 and Col 1.
-    Returns (col_email, col_name) based on which column contains '@'.
+    Scans Col 0 and Col 1. Returns (col_email, col_name) based on content.
     """
-    # 1. Safety Check
-    if len(df.columns) < 2:
-        return df.columns[0], df.columns[0] # Fallback if only 1 col
+    if len(df.columns) < 2: return df.columns[0], df.columns[0]
 
-    c0 = df.columns[0]
-    c1 = df.columns[1]
-    
-    # 2. Scan first 20 rows for content
+    c0, c1 = df.columns[0], df.columns[1]
     sample = df.head(20).fillna('').astype(str)
     
-    # Count how many rows look like emails in each column
     score_0 = sum(1 for x in sample[c0] if '@' in x and '.' in x)
     score_1 = sum(1 for x in sample[c1] if '@' in x and '.' in x)
     
-    # 3. Decision
-    if score_0 >= score_1:
-        # Col 0 is Email, Col 1 is Name
-        return c0, c1
-    else:
-        # Col 1 is Email, Col 0 is Name
-        return c1, c0
+    return (c0, c1) if score_0 >= score_1 else (c1, c0)
 
 def detect_map_column(df, candidates):
     cols = [str(c).lower().strip() for c in df.columns]
@@ -91,16 +78,14 @@ def do_process(b):
         if not m_src: raise Exception("No Mapping CSV found!")
         df_m = pd.read_csv(m_src)
         
-        # Map Columns
         col_m_email = detect_map_column(df_m, ["email", "mail"])
         col_m_dept = detect_map_column(df_m, ["department", "dept"])
         col_m_rev = detect_map_column(df_m, ["reviewer", "owner", "manager"])
         
         if not col_m_rev or not col_m_dept:
-            with out_area: print(f"Error: Map needs 'Department' and 'Reviewer' columns. Found: {list(df_m.columns)}")
+            with out_area: print(f"Error: Map needs 'Department' and 'Reviewer'. Found: {list(df_m.columns)}")
             return
 
-        # Build Data
         mapping_data['emails'] = {}
         if col_m_email:
             mapping_data['emails'] = dict(zip(df_m[col_m_email].astype(str).str.lower().str.strip(), df_m[col_m_rev]))
@@ -115,16 +100,12 @@ def do_process(b):
         current_fname = f_item['name']
         df_u = pd.read_csv(io.BytesIO(f_item['content'])) if current_fname.endswith('.csv') else pd.read_excel(io.BytesIO(f_item['content']))
         
-        # === HERE IS THE KEY FIX ===
         col_email, col_name = identify_columns_smart(df_u)
-        logger.info(f"Auto-Detection Results:\n   - Email Column: '{col_email}'\n   - Name Column : '{col_name}'")
+        logger.info(f"Columns: Email='{col_email}', Name='{col_name}'")
         
-        # C. Primary Fetch (Email)
+        # C. Primary Fetch
         emails = df_u[col_email].dropna().unique().tolist()
-        with out_area: 
-            print(f"Detected Email Column: '{col_email}' | Name Column: '{col_name}'")
-            print(f"Syncing {len(emails)} emails with AD...")
-            
+        with out_area: print(f"Syncing {len(emails)} emails with AD...")
         with ThreadPoolExecutor(max_workers=25) as ex:
             ad_results = {r['email']: r for r in list(ex.map(fetch_ad, emails))}
 
@@ -132,7 +113,6 @@ def do_process(b):
         final_rows = []
         widget_rows = []
         
-        # Header Grid
         header_box = widgets.HBox([
             widgets.Label("Remove", layout=widgets.Layout(width='60px', font_weight='bold')),
             widgets.Label("User Name", layout=widgets.Layout(flex='2', font_weight='bold')),
@@ -144,31 +124,28 @@ def do_process(b):
         ], layout=widgets.Layout(border='0px 0px 2px 0px solid gray', padding='5px'))
 
         for idx, row in df_u.iterrows():
-            # Extract data using the detected columns
             raw_email = str(row[col_email]).strip().lower()
             raw_name = str(row[col_name]).strip()
             
-            # 1. Get AD Record
+            # 1. Get AD Record (with Name Fallback)
             ad = ad_results.get(raw_email, {"status": "Not Found", "dept": "N/A", "active": "N/A"})
-            
-            # 2. Fallback: Search by Name if Email failed
             matched_by_name = False
-            if (ad['status'] == "Not Found" or ad['status'] == "Invalid") and raw_name and raw_name.lower() != "nan":
-                ad_by_name = search_ad_by_name(raw_name)
-                if ad_by_name:
-                    ad = ad_by_name # Overwrite info
-                    matched_by_name = True
-                    # Optional: Update the email in the export to the correct AD email? 
-                    # For now, we keep the original email in the row but use AD dept for mapping.
-
-            # 3. Logic: Dept Cleaning
-            ad_dept_raw = str(ad['dept'])
-            clean_dept = ad_dept_raw.split(" - ")[-1].strip().lower() if " - " in ad_dept_raw else ad_dept_raw.strip().lower()
             
-            # 4. Logic: Matching (Email -> Dept Clean -> Dept Raw)
-            reviewer = mapping_data['emails'].get(raw_email)
-            if not reviewer: reviewer = mapping_data['depts'].get(clean_dept)
-            if not reviewer: reviewer = mapping_data['depts'].get(ad_dept_raw.strip().lower())
+            if (ad['status'] == "Not Found" or ad['status'] == "Invalid") and raw_name and raw_name.lower() != "nan":
+                # Ensure search_ad_by_name is defined from Cell 1
+                if 'search_ad_by_name' in globals():
+                    ad_by_name = search_ad_by_name(raw_name)
+                    if ad_by_name:
+                        ad = ad_by_name
+                        matched_by_name = True
+
+            # === LOGIC RESTORED FROM SCREENSHOT ===
+            # Line 75 in image: Force split by " - " and take last part
+            clean_dept = str(ad['dept']).split(" - ")[-1].strip().lower()
+            
+            # Line 79 in image: Check Email OR Check Cleaned Dept (No fallback to raw dept)
+            reviewer = mapping_data['emails'].get(raw_email) or mapping_data['depts'].get(clean_dept)
+            # ======================================
             
             is_problem = not reviewer or str(reviewer).strip().lower() in ["nan", "none", "", "null"]
             
@@ -177,7 +154,7 @@ def do_process(b):
                 
                 # Colors
                 is_active = ad['active'] is True
-                found = ad['status'] == "Found" or "Found" in ad['status']
+                found = "Found" in ad['status']
                 remove_default = False
                 
                 if is_active:
@@ -192,7 +169,6 @@ def do_process(b):
                 if matched_by_name:
                     status_txt += "<br><span style='font-size:9px; color:blue'>(Matched via Name)</span>"
 
-                # Widgets
                 chk = widgets.Checkbox(value=remove_default, indent=False, layout=widgets.Layout(width='40px'))
                 name_lbl = widgets.HTML(f"<div style='font-size:11px; font-weight:bold'>{raw_name}</div>")
                 email_lbl = widgets.HTML(f"<div style='font-size:11px'>{raw_email}</div>")
@@ -268,5 +244,5 @@ def do_save(b):
 
 # --- 6. Final UI ---
 btn_process.on_click(do_process); btn_save.on_click(do_save)
-ui = widgets.VBox([widgets.HTML("<h4>🛡️ AER Generator v6.1 (Smart Columns)</h4>"), widgets.HBox([up_list, txt_list]), widgets.HBox([up_map, txt_map]), widgets.HBox([btn_process, btn_save]), out_area])
+ui = widgets.VBox([widgets.HTML("<h4>🛡️ AER Generator v6.2 (Strict Match)</h4>"), widgets.HBox([up_list, txt_list]), widgets.HBox([up_map, txt_map]), widgets.HBox([btn_process, btn_save]), out_area])
 clear_output(); display(ui)
