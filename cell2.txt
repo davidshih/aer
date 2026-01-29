@@ -262,3 +262,4 @@ def do_save(b):
 btn_process.on_click(do_process); btn_save.on_click(do_save)
 ui = widgets.VBox([widgets.HTML("<h4>🛡️ AER Generator (v6.3 - Final)</h4>"), widgets.HBox([up_list, txt_list]), widgets.HBox([up_map, txt_map]), widgets.HBox([btn_process, btn_save]), out_area])
 clear_output(); display(ui)
+
