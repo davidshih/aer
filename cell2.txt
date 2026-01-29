@@ -1,4 +1,4 @@
-# === Cell 2: Hybrid Logic (v5.7 Core + Smart Features) ===
+# === Cell 2: Hybrid Logic (v5.7 Logic + New Branch/Status Rules) ===
 
 # --- 1. UI Styling ---
 style_html = """
@@ -66,36 +66,55 @@ def do_process(b):
     
     b.disabled = True
     try:
-        logger.info("--- Starting Analysis (Fixed Logic) ---")
+        logger.info("--- Starting Analysis (New Branch & Status Logic) ---")
         
         # A. Load Map
         m_src = io.BytesIO(up_map.value[0]['content']) if up_map.value else map_path
         if not m_src: raise Exception("No Mapping CSV found!")
         df_m = pd.read_csv(m_src)
         
+        # 1. Detect Columns
         col_m_email = detect_map_column(df_m, ["email", "mail"])
         col_m_dept = detect_map_column(df_m, ["department", "dept"])
         col_m_rev = detect_map_column(df_m, ["reviewer", "owner", "manager"])
+        col_m_br = detect_map_column(df_m, ["branch", "category", "type"]) # New Branch Column
         
         if not col_m_rev or not col_m_dept:
             with out_area: print(f"Error: Map needs 'Department' and 'Reviewer'. Found: {list(df_m.columns)}")
             return
 
+        # 2. Build Mapping Dictionaries
         mapping_data['emails'] = {}
         if col_m_email:
             mapping_data['emails'] = dict(zip(df_m[col_m_email].astype(str).str.lower().str.strip(), df_m[col_m_rev]))
         mapping_data['depts'] = dict(zip(df_m[col_m_dept].astype(str).str.lower().str.strip(), df_m[col_m_rev]))
         
-        raw_depts = sorted([str(d).strip() for d in df_m[col_m_dept].unique()])
-        mapping_data['all_branches'] = [("Select Branch...", "")] + [(d, d.lower()) for d in raw_depts if "branch" in d.lower()]
-        mapping_data['all_depts'] = [("Select Dept...", "")] + [(d, d.lower()) for d in raw_depts if "branch" not in d.lower()]
+        # 3. SPLIT BRANCH VS DEPT (Specific Logic)
+        if col_m_br:
+            # Keep only dept and branch columns, remove duplicates
+            unique_locs = df_m[[col_m_dept, col_m_br]].drop_duplicates()
+            
+            # Logic: If 'Branch' column contains "branch", it's a Branch. Else it's a Dept.
+            # Using simple string check (case insensitive)
+            is_branch = unique_locs[col_m_br].astype(str).str.lower().str.contains("branch", na=False)
+            
+            list_branches = sorted(unique_locs[is_branch][col_m_dept].unique())
+            list_depts = sorted(unique_locs[~is_branch][col_m_dept].unique())
+        else:
+            # Fallback if no branch column found: Treat everything as Dept
+            list_branches = []
+            list_depts = sorted(df_m[col_m_dept].astype(str).unique())
 
-        # B. Load User List & Detect Columns
+        mapping_data['all_branches'] = [("Select Branch...", "")] + [(d, d.lower()) for d in list_branches]
+        mapping_data['all_depts'] = [("Select Dept...", "")] + [(d, d.lower()) for d in list_depts]
+        
+        logger.info(f"Locations Mapped: {len(list_depts)} Non-Branch Depts | {len(list_branches)} Branches")
+
+        # B. Load User List
         f_item = up_list.value[0]
         current_fname = f_item['name']
         df_u = pd.read_csv(io.BytesIO(f_item['content'])) if current_fname.endswith('.csv') else pd.read_excel(io.BytesIO(f_item['content']))
         col_email, col_name = identify_columns_smart(df_u)
-        logger.info(f"Columns: Email='{col_email}', Name='{col_name}'")
         
         # C. AD Fetch
         emails = df_u[col_email].dropna().unique().tolist()
@@ -121,33 +140,38 @@ def do_process(b):
             raw_email = str(row[col_email]).strip().lower()
             raw_name = str(row[col_name]).strip()
             
-            # 1. AD Lookup (Email Only)
+            # AD Lookup (Email Only - v5.7)
             ad = ad_results.get(raw_email, {"status": "Not Found", "dept": "N/A", "active": "N/A"})
             
-            # 2. Logic: v5.7 Clean & Match
+            # Matching Logic (v5.7)
             clean_dept = str(ad['dept']).split(" - ")[-1].strip().lower()
             reviewer = mapping_data['emails'].get(raw_email) or mapping_data['depts'].get(clean_dept)
             
-            # 3. Problem Check
             is_problem = not reviewer or str(reviewer).strip().lower() in ["nan", "none", "", "null", "()"]
             
             if is_problem:
                 reviewer = "(please manual review)"
                 
-                # 4. Status Display (Fixed Boolean Logic)
+                # === NEW STATUS / REMOVE LOGIC ===
                 is_active = ad['active'] is True
                 found = "Found" in ad['status']
-                remove_default = False
                 
+                remove_default = False # Default to Unchecked
+                status_txt = ""
+
                 if is_active:
                     status_txt = f"<b style='color:green;'>Active</b><br><span style='font-size:10px; color:gray'>{ad['dept']}</span>"
+                    remove_default = False
                 elif found and not is_active:
-                    status_txt = f"<span style='color:#b8860b;'>Inactive</span>"
-                    remove_default = True
+                    # Found but Inactive -> Show Yellow, DO NOT Remove
+                    status_txt = f"<span style='color:#b8860b;'>Inactive (Disabled)</span>"
+                    remove_default = False 
                 else:
-                    status_txt = f"<b style='color:red;'>Not Found</b>"
+                    # Not Found -> Show Red, AUTO REMOVE
+                    status_txt = f"<b style='color:red;'>Not Found (No AD)</b>"
                     remove_default = True
 
+                # Widgets
                 chk = widgets.Checkbox(value=remove_default, indent=False, layout=widgets.Layout(width='40px'))
                 name_lbl = widgets.HTML(f"<div style='font-size:11px; font-weight:bold'>{raw_name}</div>")
                 email_lbl = widgets.HTML(f"<div style='font-size:11px'>{raw_email}</div>")
@@ -155,16 +179,18 @@ def do_process(b):
                 
                 tgl = widgets.ToggleButton(value=False, description='B', tooltip='Toggle Branch', layout=widgets.Layout(width='30px', height='25px'))
                 drp = widgets.Dropdown(options=mapping_data['all_depts'], layout=widgets.Layout(width='95%'))
-                res_lbl = widgets.Label(value="Unassigned")
+                res_lbl = widgets.Label(value="") # Empty as requested
 
                 def on_tgl(change, d=drp): d.options = mapping_data['all_branches'] if change['new'] else mapping_data['all_depts']; d.value = ""
-                def on_drp(change, l=res_lbl): l.value = str(mapping_data['depts'].get(change['new'], "Manual Selection"))
+                def on_drp(change, l=res_lbl): l.value = str(mapping_data['depts'].get(change['new'], "")) # Defaults to empty if not found
                 tgl.observe(on_tgl, names='value'); drp.observe(on_drp, names='value')
 
                 review_registry.append({'index': idx, 'chk': chk, 'drp': drp, 'lbl': res_lbl, 'email': raw_email})
                 widget_rows.append(widgets.HBox([chk, widgets.Box([name_lbl], layout=widgets.Layout(flex='2')), widgets.Box([email_lbl], layout=widgets.Layout(flex='2')), widgets.Box([stat_lbl], layout=widgets.Layout(flex='2')), tgl, widgets.Box([drp], layout=widgets.Layout(flex='2')), widgets.Box([res_lbl], layout=widgets.Layout(flex='1'))], layout=widgets.Layout(border='0px 0px 1px 0px solid #eee', padding='4px 0')))
 
             new_row = row.to_dict()
+            # Ensure Reviewer is empty if manual
+            if is_problem: reviewer = "" 
             new_row.update({"Reviewer": reviewer, "Reviewer's Response": "", "Details of Access Changes": ""})
             final_rows.append(new_row)
 
@@ -208,5 +234,5 @@ def do_save(b):
 
 # --- 6. Final UI ---
 btn_process.on_click(do_process); btn_save.on_click(do_save)
-ui = widgets.VBox([widgets.HTML("<h4>🛡️ AER Generator (v5.7 Logic Restored)</h4>"), widgets.HBox([up_list, txt_list]), widgets.HBox([up_map, txt_map]), widgets.HBox([btn_process, btn_save]), out_area])
+ui = widgets.VBox([widgets.HTML("<h4>🛡️ AER Generator (v5.7 Logic + Branch Split)</h4>"), widgets.HBox([up_list, txt_list]), widgets.HBox([up_map, txt_map]), widgets.HBox([btn_process, btn_save]), out_area])
 clear_output(); display(ui)
