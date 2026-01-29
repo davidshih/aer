@@ -1,215 +1,236 @@
-# === Cell 2: Hybrid Logic (v5.7 Logic + Editable UI + Excel Validation Fix) ===
+# === Cell 2: UI Components & Logic (Updated) ===
+import numpy as np
 
-# --- 1. UI Styling ---
-style_html = """
-<style>
-    .aer-row { border-bottom: 1px solid #e0e0e0; padding: 5px 0; align-items: center; }
-    .aer-header { font-weight: bold; background-color: #f0f0f0; padding: 8px 0; border-bottom: 2px solid #ccc; }
-    .aer-cell { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-</style>
-"""
-display(HTML(style_html))
+up_list = widgets.FileUpload(accept='.xlsx, .csv', description=\"1. User List\", button_style='info')
+txt_list = widgets.HTML(value=\"<i>No file selected</i>\", layout=widgets.Layout(margin='0 10px'))
+up_map = widgets.FileUpload(accept='.csv', description=\"2. Reviewer Map\", button_style='info')
 
-# --- 2. Widgets ---
-up_list = widgets.FileUpload(accept='.xlsx, .csv', description="1. User List", button_style='info')
-txt_list = widgets.HTML(value="<i>No file selected</i>", layout=widgets.Layout(margin='0 10px'))
-up_map = widgets.FileUpload(accept='.csv', description="2. Reviewer Map", button_style='info')
-
-btn_process = widgets.Button(description="🚀 Step 1: Analyze", button_style='warning', layout=widgets.Layout(width='180px'))
-btn_save = widgets.Button(description="💾 Step 2: Save", button_style='success', layout=widgets.Layout(width='180px'), disabled=True)
-out_area = widgets.Output()
-
-# Global State
-review_registry = []
-processed_df = None
-current_fname = ""
-mapping_data = {"emails": {}, "depts": {}, "all_depts": [], "all_branches": []}
-
-# --- 3. Helper Functions ---
 def get_latest_map():
-    files = glob.glob(os.path.join(MAPPING_DIR, "*.csv"))
+    files = glob.glob(os.path.join(MAPPING_DIR, \"*.csv\"))
     return max(files, key=os.path.getmtime) if files else None
 
 def on_list_file_change(c):
     fname = up_list.value[0]['name']
-    txt_list.value = f"<b style='color:green;'>✅ Selected: {fname}</b>"
+    if \"User Listing\" not in fname:
+        txt_list.value = \"<b style='color:red;'>❌ Filename must contain 'User Listing'</b>\"
+    else:
+        txt_list.value = f\"<b style='color:green;'>✅ Selected: {fname}</b>\"
+
 up_list.observe(on_list_file_change, 'value')
-
 map_path = get_latest_map()
-txt_map = widgets.HTML(value=f"<b style='color:green;'>✅ Default: {os.path.basename(map_path)}</b>" if map_path else "<i>No map found</i>", layout=widgets.Layout(margin='0 10px'))
+txt_map = widgets.HTML(value=f\"<b style='color:green;'>✅ Default: {os.path.basename(map_path)}</b>\" if map_path else \"<i>No map found</i>\", layout=widgets.Layout(margin='0 10px'))
 
-def identify_columns_smart(df):
-    """ Detects Email/Name order by content """
-    if len(df.columns) < 2: return df.columns[0], df.columns[0]
-    c0, c1 = df.columns[0], df.columns[1]
-    sample = df.head(20).fillna('').astype(str)
-    score_0 = sum(1 for x in sample[c0] if '@' in x and '.' in x)
-    score_1 = sum(1 for x in sample[c1] if '@' in x and '.' in x)
-    return (c0, c1) if score_0 >= score_1 else (c1, c0)
+btn_process = widgets.Button(description=\"🚀 Step 1: Analyze\", button_style='warning', layout=widgets.Layout(width='180px'))
+btn_save = widgets.Button(description=\"💾 Step 2: Save\", button_style='success', layout=widgets.Layout(width='180px'), disabled=True)
+out_area = widgets.Output()
 
-def detect_map_column(df, candidates):
-    cols = [str(c).lower().strip() for c in df.columns]
-    for cand in candidates:
-        for i, c in enumerate(cols):
-            if cand in c: return df.columns[i]
-    return None
+review_registry = []
+processed_df = None
+current_fname = \"\"
+mapping_data = {}
 
-# --- 4. Logic: Analysis ---
+# Helper to check if a reviewer name is valid (Edit this list if 'invalid' looks different)
+def is_valid_reviewer(val):
+    s = str(val).strip().lower()
+    invalid_keywords = ["nan", "none", "", "()", "null", "0"]
+    return s not in invalid_keywords
+
 def do_process(b):
     global processed_df, current_fname, review_registry, mapping_data
     out_area.clear_output()
     review_registry = []
     
-    if not up_list.value:
-        with out_area: print("Error: Please upload a user list.")
-        return
+    if not up_list.value or \"User Listing\" not in up_list.value[0]['name']:
+        with out_area: print(\"Error: Valid 'User Listing' file required.\")\n        return
     
     b.disabled = True
     try:
-        logger.info("--- Starting Analysis ---")
-        
-        # A. Load Map
+        # 1. Load Map
         m_src = io.BytesIO(up_map.value[0]['content']) if up_map.value else map_path
-        if not m_src: raise Exception("No Mapping CSV found!")
         df_m = pd.read_csv(m_src)
+        # Normalize columns
+        df_m.columns = [str(c).strip().lower() for c in df_m.columns]
         
-        # 1. Detect Columns
-        col_m_email = detect_map_column(df_m, ["email", "mail"])
-        col_m_dept = detect_map_column(df_m, ["department", "dept"])
-        col_m_rev = detect_map_column(df_m, ["reviewer", "owner", "manager"])
-        col_m_br = detect_map_column(df_m, ["branch", "category", "type"])
-        
-        if not col_m_rev or not col_m_dept:
-            with out_area: print(f"Error: Map needs 'Department' and 'Reviewer'. Found: {list(df_m.columns)}")
-            return
+        # Ensure required columns exist, fill NaNs with empty string for safe lookup
+        for req in ['email address', 'department', 'reviewer', 'branch']:
+            if req not in df_m.columns:
+                df_m[req] = ""
+        df_m = df_m.fillna("")
 
-        # 2. Build Mapping
-        mapping_data['emails'] = {}
-        if col_m_email:
-            mapping_data['emails'] = dict(zip(df_m[col_m_email].astype(str).str.lower().str.strip(), df_m[col_m_rev]))
-        mapping_data['depts'] = dict(zip(df_m[col_m_dept].astype(str).str.lower().str.strip(), df_m[col_m_rev]))
+        # Create Lookup Dictionaries
+        # map_by_email: {email: reviewer_name}
+        map_by_email = {str(k).strip().lower(): str(v).strip() for k, v in zip(df_m['email address'], df_m['reviewer']) if str(k).strip()}
+        # map_by_dept: {dept: reviewer_name}
+        map_by_dept = {str(k).strip().lower(): str(v).strip() for k, v in zip(df_m['department'], df_m['reviewer'])}
         
-        # 3. Split Branch vs Dept
-        if col_m_br:
-            unique_locs = df_m[[col_m_dept, col_m_br]].drop_duplicates()
-            is_branch = unique_locs[col_m_br].astype(str).str.lower().str.contains("branch", na=False)
-            list_branches = sorted(unique_locs[is_branch][col_m_dept].unique())
-            list_depts = sorted(unique_locs[~is_branch][col_m_dept].unique())
-        else:
-            list_branches = []
-            list_depts = sorted(df_m[col_m_dept].astype(str).unique())
+        # UI Options for Dropdown
+        all_options = sorted([(str(d), str(d).lower().strip()) for d in df_m['department'].unique() if str(d).strip()])
+        branch_opts = [o for o in all_options if "branch" in o[0].lower()]
+        dept_opts = [o for o in all_options if "branch" not in o[0].lower()]
+        
+        # Store for dropdown callbacks
+        mapping_data['depts'] = map_by_dept
 
-        mapping_data['all_branches'] = [("Select Branch...", "")] + [(d, d.lower()) for d in list_branches]
-        mapping_data['all_depts'] = [("Select Dept...", "")] + [(d, d.lower()) for d in list_depts]
-        
-        # B. Load User List
+        # 2. Load User List
         f_item = up_list.value[0]
         current_fname = f_item['name']
         df_u = pd.read_csv(io.BytesIO(f_item['content'])) if current_fname.endswith('.csv') else pd.read_excel(io.BytesIO(f_item['content']))
-        col_email, col_name = identify_columns_smart(df_u)
         
-        # C. AD Fetch
-        emails = df_u[col_email].dropna().unique().tolist()
-        with out_area: print(f"Syncing {len(emails)} emails with AD...")
-        with ThreadPoolExecutor(max_workers=25) as ex:
-            ad_results = {r['email']: r for r in list(ex.map(fetch_ad, emails))}
+        col_email = df_u.columns[0]
+        for i in range(min(2, len(df_u.columns))):
+            if \"@\" in str(df_u.iloc[0, i]): col_email = df_u.columns[i]; break
 
-        # D. Processing Loop
+        # 3. Parallel Fetch AD Info
+        emails = df_u[col_email].dropna().unique().tolist()
+        with out_area: print(f\"Connecting to AD for {len(emails)} users...\")
+        with ThreadPoolExecutor(max_workers=10) as ex:
+            ad_results = {r['email']: r for r in list(ex.map(fetch_ad_profile, emails))}
+
+        # 4. Row Processing Logic
         final_rows = []
-        widget_rows = []
-        
-        header_box = widgets.HBox([
-            widgets.Label("Remove", layout=widgets.Layout(width='60px', font_weight='bold')),
-            widgets.Label("User Name", layout=widgets.Layout(flex='2', font_weight='bold')),
-            widgets.Label("User Email", layout=widgets.Layout(flex='2', font_weight='bold')),
-            widgets.Label("AD Status", layout=widgets.Layout(flex='2', font_weight='bold')),
-            widgets.Label("Br?", layout=widgets.Layout(width='40px', font_weight='bold')),
-            widgets.Label("Mapping", layout=widgets.Layout(flex='2', font_weight='bold')),
-            widgets.Label("Reviewer", layout=widgets.Layout(flex='1', font_weight='bold')),
-        ], layout=widgets.Layout(border='0px 0px 2px 0px solid gray', padding='5px'))
+        problem_rows_data = [] # Temporary list to store data for sorting
 
         for idx, row in df_u.iterrows():
             raw_email = str(row[col_email]).strip().lower()
-            raw_name = str(row[col_name]).strip()
+            ad = ad_results.get(raw_email, {\"dept\": \"N/A\", \"active\": \"N/A\", \"last_seen\": \"no record\"})
             
-            # AD Lookup (v5.7)
-            ad = ad_results.get(raw_email, {"status": "Not Found", "dept": "N/A", "active": "N/A"})
-            
-            # Match Logic (v5.7)
-            clean_dept = str(ad['dept']).split(" - ")[-1].strip().lower()
-            reviewer = mapping_data['emails'].get(raw_email) or mapping_data['depts'].get(clean_dept)
-            
-            is_problem = not reviewer or str(reviewer).strip().lower() in ["nan", "none", "", "null", "()"]
-            
-            if is_problem:
-                reviewer = "(please manual review)"
-                
-                # Logic: Status / Remove
-                is_active = ad['active'] is True
-                found = "Found" in ad['status']
-                remove_default = False
-                status_txt = ""
+            # Use AD Department if available, otherwise user list department (assuming col exists, else empty)
+            # Here we parse the AD department for matching logic as per original code
+            clean_dept = str(ad['dept']).split(\" - \")[-1].strip().lower()
 
-                if is_active:
-                    status_txt = f"<b style='color:green;'>Active</b><br><span style='font-size:10px; color:gray'>{ad['dept']}</span>"
-                elif found and not is_active:
-                    status_txt = f"<span style='color:#b8860b;'>Inactive (Disabled)</span>"
-                    remove_default = False 
+            reviewer = ""
+            is_manual_case = False
+            
+            # --- LOGIC CHANGE START ---
+            
+            # Priority 1: Check by Email
+            if raw_email in map_by_email:
+                direct_reviewer = map_by_email[raw_email]
+                if is_valid_reviewer(direct_reviewer):
+                    reviewer = direct_reviewer
                 else:
-                    status_txt = f"<b style='color:red;'>Not Found (No AD)</b>"
-                    remove_default = True
-
-                # Widgets
-                chk = widgets.Checkbox(value=remove_default, indent=False, layout=widgets.Layout(width='40px'))
-                name_lbl = widgets.HTML(f"<div style='font-size:11px; font-weight:bold'>{raw_name}</div>")
-                email_lbl = widgets.HTML(f"<div style='font-size:11px'>{raw_email}</div>")
-                stat_lbl = widgets.HTML(f"<div style='font-size:11px; line-height:1.1'>{status_txt}</div>")
+                    # Email match found, but reviewer name is invalid -> Manual Assign
+                    reviewer = "Dept head: manual assign"
+                    is_manual_case = True
+            
+            # Priority 2: Check by Department (only if reviewer not yet assigned)
+            if not reviewer and not is_manual_case:
+                reviewer = map_by_dept.get(clean_dept, "")
+            
+            # Final Valid Check
+            if not is_valid_reviewer(reviewer):
+                is_problem = True
+            else:
+                is_problem = False
                 
-                tgl = widgets.ToggleButton(value=False, description='B', tooltip='Toggle Branch', layout=widgets.Layout(width='30px', height='25px'))
-                drp = widgets.Dropdown(options=mapping_data['all_depts'], layout=widgets.Layout(width='95%'))
-                res_txt = widgets.Text(value="", placeholder="Type or Select...", layout=widgets.Layout(width='95%'))
+            # If specifically flagged as manual case (from Priority 1), force problem flow
+            if is_manual_case:
+                is_problem = True
 
-                def on_tgl(change, d=drp): 
-                    d.options = mapping_data['all_branches'] if change['new'] else mapping_data['all_depts']
-                    d.value = ""
+            # --- LOGIC CHANGE END ---
+
+            if is_problem:
+                # Prepare data for sorting later
+                # Sort Priority: Active (0) -> No Record (1) -> Inactive (2)
+                sort_val = 3
+                if ad['active'] is True: sort_val = 0
+                elif ad['last_seen'] == "no AD record" or ad['status'] == "Not Found": sort_val = 1
+                elif ad['active'] is False: sort_val = 2
                 
-                def on_drp(change, t=res_txt): 
-                    t.value = str(mapping_data['depts'].get(change['new'], ""))
-
-                tgl.observe(on_tgl, names='value')
-                drp.observe(on_drp, names='value')
-
-                review_registry.append({'index': idx, 'chk': chk, 'drp': drp, 'txt': res_txt, 'email': raw_email})
-                
-                widget_rows.append(widgets.HBox([
-                    chk, 
-                    widgets.Box([name_lbl], layout=widgets.Layout(flex='2')),
-                    widgets.Box([email_lbl], layout=widgets.Layout(flex='2')),
-                    widgets.Box([stat_lbl], layout=widgets.Layout(flex='2')),
-                    tgl,
-                    widgets.Box([drp], layout=widgets.Layout(flex='2')),
-                    widgets.Box([res_txt], layout=widgets.Layout(flex='1'))
-                ], layout=widgets.Layout(border='0px 0px 1px 0px solid #eee', padding='4px 0')))
+                problem_rows_data.append({
+                    'index': idx,
+                    'row_data': row,
+                    'email': raw_email,
+                    'ad': ad,
+                    'clean_dept': clean_dept,
+                    'sort_val': sort_val,
+                    'pre_filled_rev': reviewer if is_manual_case else "" # Pass the "Dept head..." text if needed
+                })
 
             new_row = row.to_dict()
-            if is_problem: reviewer = "" 
-            new_row.update({"Reviewer": reviewer, "Reviewer's Response": "", "Details of Access Changes": ""})
+            # If manual case, prepopulate the text, otherwise leave blank or what was found
+            final_rev_val = reviewer if reviewer else "(please manual review)"
+            new_row.update({\"Reviewer\": final_rev_val, \"Reviewer's Response\": \"\", \"Details of Access Changes\": \"\"})
             final_rows.append(new_row)
+
+        # 5. Build Widget UI (Sorted)
+        # Sort the problem rows: Active -> No Record -> Inactive
+        problem_rows_data.sort(key=lambda x: x['sort_val'])
+        
+        widget_rows = []
+        for p in problem_rows_data:
+            idx = p['index']
+            ad = p['ad']
+            
+            # Logic for status string & color & checkbox
+            status_html = \"\"
+            should_remove = False
+            
+            if ad['active'] == True:
+                status_html = \"<span style='color: orange; font-weight: bold;'>act: True (Attention)</span>\"
+            elif ad['active'] == False:
+                status_html = f\"<span>act: False (last: {ad['last_seen']})</span>\"
+                should_remove = True
+            elif ad['last_seen'] == \"no AD record\":
+                status_html = \"<span style='color: red; font-weight: bold;'>act: N/A (no AD record)</span>\"
+                should_remove = True
+            else:
+                status_html = f\"<span>act: N/A ({ad['last_seen']})</span>\"
+                should_remove = True
+
+            chk_rem = widgets.Checkbox(value=should_remove, layout=widgets.Layout(width='60px'))
+            chk_br = widgets.Checkbox(value=\"branch\" in p['clean_dept'], layout=widgets.Layout(width='70px'))
+            
+            # Initial dropdown value setup
+            curr_opts = branch_opts if chk_br.value else dept_opts
+            drp = widgets.Dropdown(options=curr_opts, value=None, layout=widgets.Layout(width='200px'))
+            
+            # If it was a "Manual Assign" case, we might want to display that text, 
+            # but usually the dropdown is for selecting a REAL dept to get a REAL reviewer.
+            # The label below shows the reviewer.
+            
+            lbl_rev = widgets.Label(value=p['pre_filled_rev'] or "Unassigned", layout=widgets.Layout(width='140px'))
+
+            # Dropdown & Branch Toggle Linkage
+            def update_drp(change, d=drp):
+                d.options = branch_opts if change['new'] else dept_opts
+            chk_br.observe(update_drp, names='value')
+            
+            def update_lbl(change, l=lbl_rev): 
+                # When dropdown changes, fetch the reviewer from Map
+                l.value = str(mapping_data['depts'].get(change['new'], \"Manual\"))
+            drp.observe(update_lbl, names='value')
+            
+            review_registry.append({'index': idx, 'chk': chk_rem, 'drp': drp, 'lbl': lbl_rev})
+            
+            widget_rows.append(widgets.HBox([
+                chk_rem, 
+                widgets.Label(value=p['email'], layout=widgets.Layout(width='220px')),
+                widgets.HTML(value=status_html, layout=widgets.Layout(width='250px')),
+                chk_br, drp, lbl_rev
+            ], layout=widgets.Layout(border='bottom 1px solid #ddd')))
 
         processed_df = pd.DataFrame(final_rows)
         btn_save.disabled = False
-        
         with out_area:
-            print(f"Analysis Complete. Total: {len(processed_df)} | Manual Review: {len(widget_rows)}")
-            if widget_rows: display(widgets.VBox([header_box] + widget_rows))
-            else: display(HTML("<h4 style='color:green'>All records matched automatically!</h4>"))
-                
+            print(f\"Analysis finished. Total records: {len(processed_df)}\")
+            if widget_rows:
+                display(widgets.HTML(\"<b>Review problematic records below (Sorted: Active -> NoRecord -> Inactive):</b>\"))
+                header = widgets.HBox([
+                    widgets.Label(\"REMOVE\", layout=widgets.Layout(width='60px')), 
+                    widgets.Label(\"EMAIL\", layout=widgets.Layout(width='220px')), 
+                    widgets.Label(\"AD STATUS / LAST LOGIN\", layout=widgets.Layout(width='250px')), 
+                    widgets.Label(\"BRANCH?\", layout=widgets.Layout(width='70px')),
+                    widgets.Label(\"ASSIGN DEPT/BRANCH\", layout=widgets.Layout(width='200px')),
+                    widgets.Label(\"REVIEWER\", layout=widgets.Layout(width='140px'))
+                ])
+                display(widgets.VBox([header] + widget_rows))
+            else: print(\"All records matched successfully.\")
     except Exception as e:
-        with out_area: print(f"Error: {str(e)}")
-        logger.error("Process Error", exc_info=True)
+        with out_area: print(f\"Error: {str(e)}\")
+        logger.error(\"Analysis error\", exc_info=True)
     finally: b.disabled = False
 
-# --- 5. Logic: Save ---
 def do_save(b):
     global processed_df
     b.disabled = True
@@ -219,47 +240,37 @@ def do_save(b):
         for item in review_registry:
             if item['chk'].value: 
                 to_drop.append(item['index'])
-            else:
-                final_val = item['txt'].value.strip()
-                if final_val: 
-                    df_final.at[item['index'], 'Reviewer'] = final_val
+            elif item['drp'].value is not None: 
+                # If user selected a dept from dropdown, overwrite the manual/missing reviewer
+                # But wait, if it was "Dept head: manual assign", we keep it unless they selected a new dept?
+                # Logic: If dropdown is used, use the Label value (which comes from map).
+                if item['lbl'].value != "Unassigned":
+                     df_final.at[item['index'], 'Reviewer'] = item['lbl'].value
         
         df_final = df_final.drop(to_drop)
-        fpath = os.path.join(BASE_DIR, current_fname.split('.')[0] + "_Reviewed.xlsx")
+        fpath = os.path.join(BASE_DIR, current_fname.split('.')[0] + \".xlsx\")
         df_final.to_excel(fpath, index=False)
         
-        # === DATA VALIDATION FIX ===
+        # Excel Data Validation
         wb = load_workbook(fpath)
         ws = wb.active
-        col = next((i for i, c in enumerate(ws[1], 1) if c.value == "Reviewer's Response"), None)
-        
-        if col:
-            # 1. Create Validator
-            dv = DataValidation(type="list", formula1='"Approved,Denied,Changes Required"', allow_blank=True)
-            
-            # 2. Configure Input Message (The tooltip)
-            dv.promptTitle = "Select Action"
-            dv.prompt = "Please select: Approved, Denied, or Changes Required"
-            dv.showInputMessage = True
-            
-            # 3. Configure Error Message (The popup)
-            dv.errorTitle = "Invalid Selection"
-            dv.error = "Please select a valid option from the drop-down menu."
-            dv.showErrorMessage = True
-            
-            # 4. Apply
+        col_resp = next((i for i, c in enumerate(ws[1], 1) if c.value == \"Reviewer's Response\"), None)
+        if col_resp:
+            dv = DataValidation(type=\"list\", formula1='\"Approved,Denied,Changes Required\"', allow_blank=True)
+            dv.promptTitle, dv.prompt = \"Selection\", \"Please select your responses from the drop-down menu\"
+            dv.errorTitle, dv.error = \"Error\", \"Please select a valid option form the drop-down menu\"
+            letter = get_column_letter(col_resp)
+            dv.add(f\"{letter}2:{letter}{len(df_final)+1}\")
             ws.add_data_validation(dv)
-            letter = get_column_letter(col)
-            dv.add(f"{letter}2:{letter}{len(df_final)+1}")
-            
         wb.save(fpath)
-        with out_area: display(HTML(f"<b style='color:blue;'>✔ Saved: {fpath}</b>"))
+        with out_area: display(HTML(f\"<b style='color:blue;'>Process Complete. Saved to: {fpath}</b>\"))
+        logger.info(f\"Saved {fpath}. Cleaned {len(to_drop)} rows.\")
     except Exception as e:
-        with out_area: print(f"Save Error: {str(e)}")
+        with out_area: print(f\"Save Error: {str(e)}\")
+        logger.error(\"Save Error\", exc_info=True)
     finally: b.disabled = False
 
-# --- 6. Final UI ---
 btn_process.on_click(do_process); btn_save.on_click(do_save)
-ui = widgets.VBox([widgets.HTML("<h4>🛡️ AER Generator (v6.3 - Final)</h4>"), widgets.HBox([up_list, txt_list]), widgets.HBox([up_map, txt_map]), widgets.HBox([btn_process, btn_save]), out_area])
-clear_output(); display(ui)
-
+display(widgets.VBox([widgets.HTML(\"<h4>🛡️ AER Generator v5.8 (Custom Logic)</h4>\"), 
+                      widgets.HBox([up_list, txt_list]), widgets.HBox([up_map, txt_map]), 
+                      widgets.HBox([btn_process, btn_save], layout=widgets.Layout(margin='15px 0')), out_area]))
