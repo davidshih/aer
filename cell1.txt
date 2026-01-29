@@ -1,212 +1,92 @@
-# === Cell 2: Hybrid Logic (v5.7 Core + Smart Features) ===
+# === Cell 1: Setup & Engine (v5.7 Logic Restoration) ===
+import os, sys, logging, glob, io, re, requests, json
+import pandas as pd
+import ipywidgets as widgets
+from datetime import datetime
+from dotenv import load_dotenv
+from msal import PublicClientApplication
+from concurrent.futures import ThreadPoolExecutor
+from openpyxl import load_workbook
+from openpyxl.worksheet.datavalidation import DataValidation
+from openpyxl.utils import get_column_letter
+from IPython.display import display, HTML, clear_output
 
-# --- 1. UI Styling ---
-style_html = """
-<style>
-    .aer-row { border-bottom: 1px solid #e0e0e0; padding: 5px 0; align-items: center; }
-    .aer-header { font-weight: bold; background-color: #f0f0f0; padding: 8px 0; border-bottom: 2px solid #ccc; }
-    .aer-cell { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-</style>
-"""
-display(HTML(style_html))
+# 1. Paths & Logging
+today_str = datetime.now().strftime('%Y-%m-%d')
+BASE_DIR = os.path.join("output", today_str, "create")
+LOG_DIR = os.path.join(BASE_DIR, "logs")
+MAPPING_DIR = os.path.join("input", "mapping")
+os.makedirs(LOG_DIR, exist_ok=True)
 
-# --- 2. Widgets ---
-up_list = widgets.FileUpload(accept='.xlsx, .csv', description="1. User List", button_style='info')
-txt_list = widgets.HTML(value="<i>No file selected</i>", layout=widgets.Layout(margin='0 10px'))
-up_map = widgets.FileUpload(accept='.csv', description="2. Reviewer Map", button_style='info')
+log_file = os.path.join(LOG_DIR, f"aer_create_{today_str}_{datetime.now().strftime('%H%M')}.log")
+logger = logging.getLogger("aer")
+logger.handlers.clear()
+logger.setLevel(logging.INFO)
+formatter = logging.Formatter('%(asctime)s | %(levelname)s | %(message)s')
+fh = logging.FileHandler(log_file, encoding="utf-8")
+fh.setFormatter(formatter)
+logger.addHandler(fh)
+logger.addHandler(logging.StreamHandler(sys.stdout))
 
-btn_process = widgets.Button(description="🚀 Step 1: Analyze", button_style='warning', layout=widgets.Layout(width='180px'))
-btn_save = widgets.Button(description="💾 Step 2: Save", button_style='success', layout=widgets.Layout(width='180px'), disabled=True)
-out_area = widgets.Output()
+# 2. Auth & Cache
+load_dotenv()
+headers = {}
+try:
+    tid, cid = os.getenv("AZURE_TENANT_ID"), os.getenv("AZURE_CLIENT_ID")
+    if tid and cid:
+        app = PublicClientApplication(cid, authority=f"https://login.microsoftonline.com/{tid}")
+        # STRICT v5.7 Scope: Only User.Read.All
+        res = app.acquire_token_interactive(scopes=["User.Read.All"], prompt="select_account")
+        if "access_token" in res:
+            headers = {"Authorization": f"Bearer {res['access_token']}"}
+            logger.info("Authentication Successful")
+except Exception as e:
+    logger.error(f"Auth Critical Error: {str(e)}")
 
-# Global State
-review_registry = []
-processed_df = None
-current_fname = ""
-mapping_data = {"emails": {}, "depts": {}, "all_depts": [], "all_branches": []}
+ad_cache = {}
+session = requests.Session()
+# Boost connection pool for speed
+adapter = requests.adapters.HTTPAdapter(pool_connections=50, pool_maxsize=50)
+session.mount('https://', adapter)
 
-# --- 3. Helper Functions ---
-def get_latest_map():
-    files = glob.glob(os.path.join(MAPPING_DIR, "*.csv"))
-    return max(files, key=os.path.getmtime) if files else None
-
-def on_list_file_change(c):
-    fname = up_list.value[0]['name']
-    txt_list.value = f"<b style='color:green;'>✅ Selected: {fname}</b>"
-up_list.observe(on_list_file_change, 'value')
-
-map_path = get_latest_map()
-txt_map = widgets.HTML(value=f"<b style='color:green;'>✅ Default: {os.path.basename(map_path)}</b>" if map_path else "<i>No map found</i>", layout=widgets.Layout(margin='0 10px'))
-
-def identify_columns_smart(df):
-    """ Detects Email/Name order by content """
-    if len(df.columns) < 2: return df.columns[0], df.columns[0]
-    c0, c1 = df.columns[0], df.columns[1]
-    sample = df.head(20).fillna('').astype(str)
-    score_0 = sum(1 for x in sample[c0] if '@' in x and '.' in x)
-    score_1 = sum(1 for x in sample[c1] if '@' in x and '.' in x)
-    return (c0, c1) if score_0 >= score_1 else (c1, c0)
-
-def detect_map_column(df, candidates):
-    cols = [str(c).lower().strip() for c in df.columns]
-    for cand in candidates:
-        for i, c in enumerate(cols):
-            if cand in c: return df.columns[i]
-    return None
-
-# --- 4. Logic: Analysis ---
-def do_process(b):
-    global processed_df, current_fname, review_registry, mapping_data
-    out_area.clear_output()
-    review_registry = []
+def fetch_ad(email):
+    """ 
+    Exact v5.7 Logic:
+    - No ID check
+    - No Last Login check (prevents 403 Forbidden)
+    - Just Name, Dept, Status
+    """
+    email = str(email).strip().lower()
     
-    if not up_list.value:
-        with out_area: print("Error: Please upload a user list.")
-        return
+    # 1. Validation
+    if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email):
+        return {"email": email, "status": "Invalid", "name": "N/A", "dept": "N/A", "active": "N/A"}
     
-    b.disabled = True
+    # 2. Cache
+    if email in ad_cache: return ad_cache[email]
+    
+    # 3. Mock Mode (No Auth)
+    if not headers: 
+        return {"email": email, "status": "Mock", "name": "User", "dept": "Mock Dept", "active": True}
+    
     try:
-        logger.info("--- Starting Analysis (Fixed Logic) ---")
+        # STRICT v5.7 URL: No 'signInActivity', No 'id'
+        url = f"https://graph.microsoft.com/v1.0/users/{email}?$select=displayName,department,accountEnabled"
+        r = session.get(url, headers=headers, timeout=5)
         
-        # A. Load Map
-        m_src = io.BytesIO(up_map.value[0]['content']) if up_map.value else map_path
-        if not m_src: raise Exception("No Mapping CSV found!")
-        df_m = pd.read_csv(m_src)
+        if r.status_code == 200:
+            d = r.json()
+            res = {
+                "email": email, 
+                "status": "Found", 
+                "name": d.get("displayName", "N/A"), 
+                "dept": d.get("department") or "N/A", 
+                "active": d.get("accountEnabled", "N/A") # This returns Boolean True/False
+            }
+        else:
+            res = {"email": email, "status": "Not Found", "name": "N/A", "dept": "N/A", "active": "N/A"}
+    except:
+        res = {"email": email, "status": "Error", "name": "N/A", "dept": "N/A", "active": "N/A"}
         
-        col_m_email = detect_map_column(df_m, ["email", "mail"])
-        col_m_dept = detect_map_column(df_m, ["department", "dept"])
-        col_m_rev = detect_map_column(df_m, ["reviewer", "owner", "manager"])
-        
-        if not col_m_rev or not col_m_dept:
-            with out_area: print(f"Error: Map needs 'Department' and 'Reviewer'. Found: {list(df_m.columns)}")
-            return
-
-        mapping_data['emails'] = {}
-        if col_m_email:
-            mapping_data['emails'] = dict(zip(df_m[col_m_email].astype(str).str.lower().str.strip(), df_m[col_m_rev]))
-        mapping_data['depts'] = dict(zip(df_m[col_m_dept].astype(str).str.lower().str.strip(), df_m[col_m_rev]))
-        
-        raw_depts = sorted([str(d).strip() for d in df_m[col_m_dept].unique()])
-        mapping_data['all_branches'] = [("Select Branch...", "")] + [(d, d.lower()) for d in raw_depts if "branch" in d.lower()]
-        mapping_data['all_depts'] = [("Select Dept...", "")] + [(d, d.lower()) for d in raw_depts if "branch" not in d.lower()]
-
-        # B. Load User List & Detect Columns
-        f_item = up_list.value[0]
-        current_fname = f_item['name']
-        df_u = pd.read_csv(io.BytesIO(f_item['content'])) if current_fname.endswith('.csv') else pd.read_excel(io.BytesIO(f_item['content']))
-        col_email, col_name = identify_columns_smart(df_u)
-        logger.info(f"Columns: Email='{col_email}', Name='{col_name}'")
-        
-        # C. AD Fetch
-        emails = df_u[col_email].dropna().unique().tolist()
-        with out_area: print(f"Syncing {len(emails)} emails with AD...")
-        with ThreadPoolExecutor(max_workers=25) as ex:
-            ad_results = {r['email']: r for r in list(ex.map(fetch_ad, emails))}
-
-        # D. Processing Loop
-        final_rows = []
-        widget_rows = []
-        
-        header_box = widgets.HBox([
-            widgets.Label("Remove", layout=widgets.Layout(width='60px', font_weight='bold')),
-            widgets.Label("User Name", layout=widgets.Layout(flex='2', font_weight='bold')),
-            widgets.Label("User Email", layout=widgets.Layout(flex='2', font_weight='bold')),
-            widgets.Label("AD Status", layout=widgets.Layout(flex='2', font_weight='bold')),
-            widgets.Label("Br?", layout=widgets.Layout(width='40px', font_weight='bold')),
-            widgets.Label("Mapping", layout=widgets.Layout(flex='2', font_weight='bold')),
-            widgets.Label("Reviewer", layout=widgets.Layout(flex='1', font_weight='bold')),
-        ], layout=widgets.Layout(border='0px 0px 2px 0px solid gray', padding='5px'))
-
-        for idx, row in df_u.iterrows():
-            raw_email = str(row[col_email]).strip().lower()
-            raw_name = str(row[col_name]).strip()
-            
-            # 1. AD Lookup (Email Only)
-            ad = ad_results.get(raw_email, {"status": "Not Found", "dept": "N/A", "active": "N/A"})
-            
-            # 2. Logic: v5.7 Clean & Match
-            clean_dept = str(ad['dept']).split(" - ")[-1].strip().lower()
-            reviewer = mapping_data['emails'].get(raw_email) or mapping_data['depts'].get(clean_dept)
-            
-            # 3. Problem Check
-            is_problem = not reviewer or str(reviewer).strip().lower() in ["nan", "none", "", "null", "()"]
-            
-            if is_problem:
-                reviewer = "(please manual review)"
-                
-                # 4. Status Display (Fixed Boolean Logic)
-                is_active = ad['active'] is True
-                found = "Found" in ad['status']
-                remove_default = False
-                
-                if is_active:
-                    status_txt = f"<b style='color:green;'>Active</b><br><span style='font-size:10px; color:gray'>{ad['dept']}</span>"
-                elif found and not is_active:
-                    status_txt = f"<span style='color:#b8860b;'>Inactive</span>"
-                    remove_default = True
-                else:
-                    status_txt = f"<b style='color:red;'>Not Found</b>"
-                    remove_default = True
-
-                chk = widgets.Checkbox(value=remove_default, indent=False, layout=widgets.Layout(width='40px'))
-                name_lbl = widgets.HTML(f"<div style='font-size:11px; font-weight:bold'>{raw_name}</div>")
-                email_lbl = widgets.HTML(f"<div style='font-size:11px'>{raw_email}</div>")
-                stat_lbl = widgets.HTML(f"<div style='font-size:11px; line-height:1.1'>{status_txt}</div>")
-                
-                tgl = widgets.ToggleButton(value=False, description='B', tooltip='Toggle Branch', layout=widgets.Layout(width='30px', height='25px'))
-                drp = widgets.Dropdown(options=mapping_data['all_depts'], layout=widgets.Layout(width='95%'))
-                res_lbl = widgets.Label(value="Unassigned")
-
-                def on_tgl(change, d=drp): d.options = mapping_data['all_branches'] if change['new'] else mapping_data['all_depts']; d.value = ""
-                def on_drp(change, l=res_lbl): l.value = str(mapping_data['depts'].get(change['new'], "Manual Selection"))
-                tgl.observe(on_tgl, names='value'); drp.observe(on_drp, names='value')
-
-                review_registry.append({'index': idx, 'chk': chk, 'drp': drp, 'lbl': res_lbl, 'email': raw_email})
-                widget_rows.append(widgets.HBox([chk, widgets.Box([name_lbl], layout=widgets.Layout(flex='2')), widgets.Box([email_lbl], layout=widgets.Layout(flex='2')), widgets.Box([stat_lbl], layout=widgets.Layout(flex='2')), tgl, widgets.Box([drp], layout=widgets.Layout(flex='2')), widgets.Box([res_lbl], layout=widgets.Layout(flex='1'))], layout=widgets.Layout(border='0px 0px 1px 0px solid #eee', padding='4px 0')))
-
-            new_row = row.to_dict()
-            new_row.update({"Reviewer": reviewer, "Reviewer's Response": "", "Details of Access Changes": ""})
-            final_rows.append(new_row)
-
-        processed_df = pd.DataFrame(final_rows)
-        btn_save.disabled = False
-        
-        with out_area:
-            print(f"Analysis Complete. Total: {len(processed_df)} | Manual Review: {len(widget_rows)}")
-            if widget_rows: display(widgets.VBox([header_box] + widget_rows))
-            else: display(HTML("<h4 style='color:green'>All records matched automatically!</h4>"))
-                
-    except Exception as e:
-        with out_area: print(f"Error: {str(e)}")
-        logger.error("Process Error", exc_info=True)
-    finally: b.disabled = False
-
-# --- 5. Logic: Save ---
-def do_save(b):
-    global processed_df
-    b.disabled = True
-    try:
-        df_final = processed_df.copy()
-        to_drop = []
-        for item in review_registry:
-            if item['chk'].value: to_drop.append(item['index'])
-            elif item['drp'].value != "": df_final.at[item['index'], 'Reviewer'] = item['lbl'].value
-        df_final = df_final.drop(to_drop)
-        fpath = os.path.join(BASE_DIR, current_fname.split('.')[0] + "_Reviewed.xlsx")
-        df_final.to_excel(fpath, index=False)
-        wb = load_workbook(fpath); ws = wb.active
-        col = next((i for i, c in enumerate(ws[1], 1) if c.value == "Reviewer's Response"), None)
-        if col:
-            dv = DataValidation(type="list", formula1='"Approved,Denied,Changes Required"', allow_blank=True)
-            ws.add_data_validation(dv)
-            dv.add(f"{get_column_letter(col)}2:{get_column_letter(col)}{len(df_final)+1}")
-        wb.save(fpath)
-        with out_area: display(HTML(f"<b style='color:blue;'>✔ Saved: {fpath}</b>"))
-    except Exception as e:
-        with out_area: print(f"Save Error: {str(e)}")
-    finally: b.disabled = False
-
-# --- 6. Final UI ---
-btn_process.on_click(do_process); btn_save.on_click(do_save)
-ui = widgets.VBox([widgets.HTML("<h4>🛡️ AER Generator (v5.7 Logic Restored)</h4>"), widgets.HBox([up_list, txt_list]), widgets.HBox([up_map, txt_map]), widgets.HBox([btn_process, btn_save]), out_area])
-clear_output(); display(ui)
+    ad_cache[email] = res
+    return res

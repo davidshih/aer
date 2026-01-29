@@ -1,6 +1,6 @@
-# === Cell 2: Hybrid Logic (v5.7 Logic + Smart UI) ===
+# === Cell 2: Hybrid Logic (v5.7 Core + Smart Features) ===
 
-# --- 1. UI Styling (Elegant Grid) ---
+# --- 1. UI Styling ---
 style_html = """
 <style>
     .aer-row { border-bottom: 1px solid #e0e0e0; padding: 5px 0; align-items: center; }
@@ -39,20 +39,12 @@ map_path = get_latest_map()
 txt_map = widgets.HTML(value=f"<b style='color:green;'>✅ Default: {os.path.basename(map_path)}</b>" if map_path else "<i>No map found</i>", layout=widgets.Layout(margin='0 10px'))
 
 def identify_columns_smart(df):
-    """
-    Scans Col 0 and Col 1. Returns (col_email, col_name) based on content.
-    Handles 'Name, Email' vs 'Email, Name' order automatically.
-    """
+    """ Detects Email/Name order by content """
     if len(df.columns) < 2: return df.columns[0], df.columns[0]
-
     c0, c1 = df.columns[0], df.columns[1]
     sample = df.head(20).fillna('').astype(str)
-    
-    # Count rows with '@' and '.'
     score_0 = sum(1 for x in sample[c0] if '@' in x and '.' in x)
     score_1 = sum(1 for x in sample[c1] if '@' in x and '.' in x)
-    
-    # If Col 0 has more emails, it is the email column.
     return (c0, c1) if score_0 >= score_1 else (c1, c0)
 
 def detect_map_column(df, candidates):
@@ -74,14 +66,13 @@ def do_process(b):
     
     b.disabled = True
     try:
-        logger.info("--- Starting Analysis (Hybrid 5.7 Logic) ---")
+        logger.info("--- Starting Analysis (Fixed Logic) ---")
         
         # A. Load Map
         m_src = io.BytesIO(up_map.value[0]['content']) if up_map.value else map_path
         if not m_src: raise Exception("No Mapping CSV found!")
         df_m = pd.read_csv(m_src)
         
-        # Detect Map Columns
         col_m_email = detect_map_column(df_m, ["email", "mail"])
         col_m_dept = detect_map_column(df_m, ["department", "dept"])
         col_m_rev = detect_map_column(df_m, ["reviewer", "owner", "manager"])
@@ -90,36 +81,32 @@ def do_process(b):
             with out_area: print(f"Error: Map needs 'Department' and 'Reviewer'. Found: {list(df_m.columns)}")
             return
 
-        # B. Prepare Mapping Data
         mapping_data['emails'] = {}
         if col_m_email:
             mapping_data['emails'] = dict(zip(df_m[col_m_email].astype(str).str.lower().str.strip(), df_m[col_m_rev]))
         mapping_data['depts'] = dict(zip(df_m[col_m_dept].astype(str).str.lower().str.strip(), df_m[col_m_rev]))
         
-        # Prepare Lists for UI (Branches vs Depts)
         raw_depts = sorted([str(d).strip() for d in df_m[col_m_dept].unique()])
         mapping_data['all_branches'] = [("Select Branch...", "")] + [(d, d.lower()) for d in raw_depts if "branch" in d.lower()]
         mapping_data['all_depts'] = [("Select Dept...", "")] + [(d, d.lower()) for d in raw_depts if "branch" not in d.lower()]
 
-        # C. Load User List & Detect Columns (Smart Order)
+        # B. Load User List & Detect Columns
         f_item = up_list.value[0]
         current_fname = f_item['name']
         df_u = pd.read_csv(io.BytesIO(f_item['content'])) if current_fname.endswith('.csv') else pd.read_excel(io.BytesIO(f_item['content']))
-        
         col_email, col_name = identify_columns_smart(df_u)
-        logger.info(f"Columns Detected: Email='{col_email}', Name='{col_name}'")
+        logger.info(f"Columns: Email='{col_email}', Name='{col_name}'")
         
-        # D. AD Fetch (Email Source of Truth)
+        # C. AD Fetch
         emails = df_u[col_email].dropna().unique().tolist()
         with out_area: print(f"Syncing {len(emails)} emails with AD...")
         with ThreadPoolExecutor(max_workers=25) as ex:
             ad_results = {r['email']: r for r in list(ex.map(fetch_ad, emails))}
 
-        # E. Processing Loop
+        # D. Processing Loop
         final_rows = []
         widget_rows = []
         
-        # UI Header
         header_box = widgets.HBox([
             widgets.Label("Remove", layout=widgets.Layout(width='60px', font_weight='bold')),
             widgets.Label("User Name", layout=widgets.Layout(flex='2', font_weight='bold')),
@@ -134,24 +121,20 @@ def do_process(b):
             raw_email = str(row[col_email]).strip().lower()
             raw_name = str(row[col_name]).strip()
             
-            # 1. AD Lookup (Strict: Email Only)
+            # 1. AD Lookup (Email Only)
             ad = ad_results.get(raw_email, {"status": "Not Found", "dept": "N/A", "active": "N/A"})
             
-            # 2. Logic: v5.7 Strict Department Cleaning
-            # Force split by " - " and take the last part.
+            # 2. Logic: v5.7 Clean & Match
             clean_dept = str(ad['dept']).split(" - ")[-1].strip().lower()
-            
-            # 3. Logic: v5.7 Strict Matching
-            # Check Email Map OR Check Cleaned Dept Map. No fallback to raw dept.
             reviewer = mapping_data['emails'].get(raw_email) or mapping_data['depts'].get(clean_dept)
             
-            # 4. Check for Issues
+            # 3. Problem Check
             is_problem = not reviewer or str(reviewer).strip().lower() in ["nan", "none", "", "null", "()"]
             
             if is_problem:
                 reviewer = "(please manual review)"
                 
-                # Colors & Status Logic
+                # 4. Status Display (Fixed Boolean Logic)
                 is_active = ad['active'] is True
                 found = "Found" in ad['status']
                 remove_default = False
@@ -162,46 +145,24 @@ def do_process(b):
                     status_txt = f"<span style='color:#b8860b;'>Inactive</span>"
                     remove_default = True
                 else:
-                    # Red for Not Found (since we rely on Email as truth)
-                    status_txt = f"<b style='color:red;'>Not Found (No AD)</b>"
+                    status_txt = f"<b style='color:red;'>Not Found</b>"
                     remove_default = True
 
-                # --- The Smart UI Components ---
                 chk = widgets.Checkbox(value=remove_default, indent=False, layout=widgets.Layout(width='40px'))
                 name_lbl = widgets.HTML(f"<div style='font-size:11px; font-weight:bold'>{raw_name}</div>")
                 email_lbl = widgets.HTML(f"<div style='font-size:11px'>{raw_email}</div>")
                 stat_lbl = widgets.HTML(f"<div style='font-size:11px; line-height:1.1'>{status_txt}</div>")
                 
-                # Branch Toggle (Feature you wanted kept)
-                tgl = widgets.ToggleButton(value=False, description='B', tooltip='Toggle Branch List', layout=widgets.Layout(width='30px', height='25px'))
+                tgl = widgets.ToggleButton(value=False, description='B', tooltip='Toggle Branch', layout=widgets.Layout(width='30px', height='25px'))
                 drp = widgets.Dropdown(options=mapping_data['all_depts'], layout=widgets.Layout(width='95%'))
                 res_lbl = widgets.Label(value="Unassigned")
 
-                # Event Handlers
-                def on_tgl(change, d=drp): 
-                    d.options = mapping_data['all_branches'] if change['new'] else mapping_data['all_depts']
-                    d.value = "" # Reset selection on toggle
-                
-                def on_drp(change, l=res_lbl): 
-                    l.value = str(mapping_data['depts'].get(change['new'], "Manual Selection"))
-
-                tgl.observe(on_tgl, names='value')
-                drp.observe(on_drp, names='value')
+                def on_tgl(change, d=drp): d.options = mapping_data['all_branches'] if change['new'] else mapping_data['all_depts']; d.value = ""
+                def on_drp(change, l=res_lbl): l.value = str(mapping_data['depts'].get(change['new'], "Manual Selection"))
+                tgl.observe(on_tgl, names='value'); drp.observe(on_drp, names='value')
 
                 review_registry.append({'index': idx, 'chk': chk, 'drp': drp, 'lbl': res_lbl, 'email': raw_email})
-                
-                # Grid Row
-                row_box = widgets.HBox([
-                    chk, 
-                    widgets.Box([name_lbl], layout=widgets.Layout(flex='2')),
-                    widgets.Box([email_lbl], layout=widgets.Layout(flex='2')),
-                    widgets.Box([stat_lbl], layout=widgets.Layout(flex='2')),
-                    tgl,
-                    widgets.Box([drp], layout=widgets.Layout(flex='2')),
-                    widgets.Box([res_lbl], layout=widgets.Layout(flex='1'))
-                ], layout=widgets.Layout(border='0px 0px 1px 0px solid #eee', padding='4px 0'))
-                
-                widget_rows.append(row_box)
+                widget_rows.append(widgets.HBox([chk, widgets.Box([name_lbl], layout=widgets.Layout(flex='2')), widgets.Box([email_lbl], layout=widgets.Layout(flex='2')), widgets.Box([stat_lbl], layout=widgets.Layout(flex='2')), tgl, widgets.Box([drp], layout=widgets.Layout(flex='2')), widgets.Box([res_lbl], layout=widgets.Layout(flex='1'))], layout=widgets.Layout(border='0px 0px 1px 0px solid #eee', padding='4px 0')))
 
             new_row = row.to_dict()
             new_row.update({"Reviewer": reviewer, "Reviewer's Response": "", "Details of Access Changes": ""})
@@ -230,26 +191,22 @@ def do_save(b):
         for item in review_registry:
             if item['chk'].value: to_drop.append(item['index'])
             elif item['drp'].value != "": df_final.at[item['index'], 'Reviewer'] = item['lbl'].value
-        
         df_final = df_final.drop(to_drop)
         fpath = os.path.join(BASE_DIR, current_fname.split('.')[0] + "_Reviewed.xlsx")
         df_final.to_excel(fpath, index=False)
-        
-        wb = load_workbook(fpath)
-        ws = wb.active
+        wb = load_workbook(fpath); ws = wb.active
         col = next((i for i, c in enumerate(ws[1], 1) if c.value == "Reviewer's Response"), None)
         if col:
             dv = DataValidation(type="list", formula1='"Approved,Denied,Changes Required"', allow_blank=True)
-            letter = get_column_letter(col)
-            dv.add(f"{letter}2:{letter}{len(df_final)+1}")
             ws.add_data_validation(dv)
+            dv.add(f"{get_column_letter(col)}2:{get_column_letter(col)}{len(df_final)+1}")
         wb.save(fpath)
-        with out_area: display(HTML(f"<b style='color:blue;'>✔ Saved: {fpath} (Removed {len(to_drop)})</b>"))
+        with out_area: display(HTML(f"<b style='color:blue;'>✔ Saved: {fpath}</b>"))
     except Exception as e:
         with out_area: print(f"Save Error: {str(e)}")
     finally: b.disabled = False
 
 # --- 6. Final UI ---
 btn_process.on_click(do_process); btn_save.on_click(do_save)
-ui = widgets.VBox([widgets.HTML("<h4>🛡️ AER Generator (Hybrid v5.7 Logic + Smart UI)</h4>"), widgets.HBox([up_list, txt_list]), widgets.HBox([up_map, txt_map]), widgets.HBox([btn_process, btn_save]), out_area])
+ui = widgets.VBox([widgets.HTML("<h4>🛡️ AER Generator (v5.7 Logic Restored)</h4>"), widgets.HBox([up_list, txt_list]), widgets.HBox([up_map, txt_map]), widgets.HBox([btn_process, btn_save]), out_area])
 clear_output(); display(ui)
