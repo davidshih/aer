@@ -1,6 +1,6 @@
-# === Cell 2: UI & Processing Logic (v5.8 Enhanced) ===
+# === Cell 2: UI & Processing Logic (v5.9 Fix) ===
 
-# --- 1. UI Styling & Layout ---
+# --- 1. UI Styling ---
 style_html = """
 <style>
     .aer-row { border-bottom: 1px solid #e0e0e0; padding: 5px 0; align-items: center; }
@@ -41,11 +41,13 @@ up_list.observe(on_list_file_change, 'value')
 map_path = get_latest_map()
 txt_map = widgets.HTML(value=f"<b style='color:green;'>✅ Default: {os.path.basename(map_path)}</b>" if map_path else "<i>No map found</i>", layout=widgets.Layout(margin='0 10px'))
 
-def detect_email_column(df):
-    for i in range(min(2, len(df.columns))):
-        sample = str(df.iloc[0, i])
-        if "@" in sample: return df.columns[i]
-    return df.columns[0]
+def detect_columns(df, keywords):
+    """Finds a column containing any of the keywords"""
+    cols = [str(c).lower().strip() for c in df.columns]
+    for k in keywords:
+        for i, c in enumerate(cols):
+            if k in c: return df.columns[i]
+    return None
 
 # --- 4. Logic: Analysis ---
 def do_process(b):
@@ -63,30 +65,48 @@ def do_process(b):
         
         # A. Load Map & Parse Branches
         m_src = io.BytesIO(up_map.value[0]['content']) if up_map.value else map_path
+        if not m_src: raise Exception("No Mapping CSV found!")
+            
         df_m = pd.read_csv(m_src)
-        df_m.columns = [str(c).strip().lower() for c in df_m.columns]
         
-        mapping_data['emails'] = {str(k).strip().lower(): v for k, v in zip(df_m['email address'], df_m['reviewer'])}
-        mapping_data['depts'] = {str(k).strip().lower(): v for k, v in zip(df_m['department'], df_m['reviewer'])}
+        # Smart Column Detection
+        col_m_email = detect_columns(df_m, ["email", "mail"])
+        col_m_dept = detect_columns(df_m, ["department", "dept", "function"])
+        col_m_rev = detect_columns(df_m, ["reviewer", "owner", "manager"])
         
-        # Categorize Departments vs Branches (Logic: contains "Branch")
-        raw_depts = sorted([str(d).strip() for d in df_m['department'].unique()])
+        if not col_m_rev or not col_m_dept:
+            with out_area: print(f"Error: Could not find 'Department' or 'Reviewer' columns in map. Found: {list(df_m.columns)}")
+            return
+
+        # Build Lookups
+        mapping_data['emails'] = {}
+        if col_m_email:
+            mapping_data['emails'] = {str(k).strip().lower(): v for k, v in zip(df_m[col_m_email], df_m[col_m_rev])}
+            
+        mapping_data['depts'] = {str(k).strip().lower(): v for k, v in zip(df_m[col_m_dept], df_m[col_m_rev])}
+        
+        # UI Lists
+        raw_depts = sorted([str(d).strip() for d in df_m[col_m_dept].unique()])
         mapping_data['all_branches'] = [("Select Branch...", "")] + [(d, d.lower()) for d in raw_depts if "branch" in d.lower()]
         mapping_data['all_depts'] = [("Select Dept...", "")] + [(d, d.lower()) for d in raw_depts if "branch" not in d.lower()]
         
-        logger.info(f"Mapping Loaded: {len(mapping_data['emails'])} emails, {len(raw_depts)} depts/branches mapped.")
+        logger.info(f"Mapping Loaded: {len(mapping_data['emails'])} emails, {len(raw_depts)} depts mapped.")
 
         # B. Load User List
         f_item = up_list.value[0]
         current_fname = f_item['name']
         df_u = pd.read_csv(io.BytesIO(f_item['content'])) if current_fname.endswith('.csv') else pd.read_excel(io.BytesIO(f_item['content']))
-        col_email = detect_email_column(df_u)
-        logger.info(f"User List Loaded: {len(df_u)} rows. Detected Email Col: {col_email}")
+        
+        # Smart User List Email Detection
+        col_email = detect_columns(df_u, ["email", "mail", "user principal", "upn"])
+        if not col_email: col_email = df_u.columns[0] # Fallback
+        
+        logger.info(f"User List Loaded: {len(df_u)} rows. Using Email Col: {col_email}")
 
         # C. AD Fetch
         emails = df_u[col_email].dropna().unique().tolist()
         with out_area: print(f"Syncing {len(emails)} emails with AD...")
-        with ThreadPoolExecutor(max_workers=10) as ex:
+        with ThreadPoolExecutor(max_workers=25) as ex:
             ad_results = {r['email']: r for r in list(ex.map(fetch_ad, emails))}
 
         # D. Processing & Matching
@@ -103,48 +123,59 @@ def do_process(b):
             widgets.Label("Result Reviewer", layout=widgets.Layout(flex='1', font_weight='bold')),
         ], layout=widgets.Layout(border='0px 0px 2px 0px solid gray', padding='5px'))
 
+        debug_logs = []
+
         for idx, row in df_u.iterrows():
             raw_email = str(row[col_email]).strip().lower()
             ad = ad_results.get(raw_email, {"status": "Not Found", "dept": "N/A", "active": "N/A", "last_login": None})
             
-            clean_dept = str(ad['dept']).split(" - ")[-1].strip().lower()
-            reviewer = mapping_data['emails'].get(raw_email) or mapping_data['depts'].get(clean_dept)
+            # === MATCHING LOGIC FIX ===
+            # 1. Try Direct Email Match
+            reviewer = mapping_data['emails'].get(raw_email)
             
+            # 2. Try Dept Match (Hybrid)
+            if not reviewer and ad['dept'] != "N/A":
+                raw_dept = str(ad['dept']).strip().lower()
+                clean_dept = raw_dept.split(" - ")[-1].strip() # Handle "Code - Name"
+                
+                # Check FULL name first, then check SHORT name
+                reviewer = mapping_data['depts'].get(raw_dept) or mapping_data['depts'].get(clean_dept)
+                
+                # Debug logging for the first 3 failures
+                if not reviewer and len(debug_logs) < 3:
+                    debug_logs.append(f"Fail: Email='{raw_email}' | AD Dept='{raw_dept}' | Clean Dept='{clean_dept}'")
+
+            # 3. Validation
             is_problem = not reviewer or str(reviewer).strip().lower() in ["nan", "none", "", "()"]
             
             if is_problem:
                 reviewer = "(please manual review)"
                 
-                # --- Advanced Logic for Widget ---
-                # 1. Colors & Text
+                # Colors & Widgets
                 is_active = ad['active'] is True
                 found = ad['status'] == "Found"
                 remove_default = False
                 
                 if is_active:
-                    status_html = f"<b style='color:green;'>Act: True</b>"
+                    status_html = f"<b style='color:green;'>Act: True</b><br><span style='font-size:10px; color:gray'>{ad['dept']}</span>"
                 elif found and not is_active:
                     last_seen = ad.get('last_login') or "Unknown"
                     status_html = f"<span style='color:#b8860b;'>Inactive (Last: {last_seen})</span>"
                     remove_default = True
-                else: # Not Found
+                else:
                     status_html = f"<b style='color:red;'>Act: N/A (No AD Record)</b>"
                     remove_default = True
 
-                # 2. Widgets
                 chk = widgets.Checkbox(value=remove_default, indent=False, layout=widgets.Layout(width='40px'))
                 email_lbl = widgets.HTML(value=f"<div style='font-size:11px'>{raw_email}</div>")
-                stat_lbl = widgets.HTML(value=f"<div style='font-size:11px'>{status_html}</div>")
+                stat_lbl = widgets.HTML(value=f"<div style='font-size:11px; line-height:1.1'>{status_html}</div>")
                 
-                # Toggle for Branch vs Dept
                 tgl = widgets.ToggleButton(value=False, description='Br', tooltip='Toggle Branch List', 
                                            button_style='', layout=widgets.Layout(width='40px', height='25px'))
                 
-                # Dropdown
                 drp = widgets.Dropdown(options=mapping_data['all_depts'], layout=widgets.Layout(width='95%'))
                 res_lbl = widgets.Label(value="Unassigned")
 
-                # Events
                 def on_tgl_change(change, d=drp):
                     d.options = mapping_data['all_branches'] if change['new'] else mapping_data['all_depts']
                     d.value = ""
@@ -157,7 +188,6 @@ def do_process(b):
 
                 review_registry.append({'index': idx, 'chk': chk, 'drp': drp, 'lbl': res_lbl, 'email': raw_email})
                 
-                # Row Container (Elegant Grid)
                 row_box = widgets.HBox([
                     chk, 
                     widgets.Box([email_lbl], layout=widgets.Layout(flex='2')),
@@ -178,6 +208,11 @@ def do_process(b):
         
         with out_area:
             print(f"Analysis Complete. Total: {len(processed_df)} | Manual Review: {len(widget_rows)}")
+            if debug_logs:
+                print("--- DEBUG: Sample Mapping Failures ---")
+                for l in debug_logs: print(l)
+                print("--------------------------------------")
+            
             if widget_rows:
                 display(widgets.VBox([header_box] + widget_rows, layout=widgets.Layout(width='100%')))
             else:
@@ -198,7 +233,6 @@ def do_save(b):
         logs_txt = []
         
         for item in review_registry:
-            # item = {index, chk, drp, lbl, email}
             if item['chk'].value: 
                 to_drop.append(item['index'])
                 logs_txt.append(f"Dropped: {item['email']}")
@@ -210,7 +244,6 @@ def do_save(b):
         fpath = os.path.join(BASE_DIR, current_fname.split('.')[0] + "_Reviewed.xlsx")
         df_final.to_excel(fpath, index=False)
         
-        # Excel Formatting
         wb = load_workbook(fpath)
         ws = wb.active
         col_resp = next((i for i, c in enumerate(ws[1], 1) if c.value == "Reviewer's Response"), None)
@@ -237,13 +270,12 @@ btn_process.on_click(do_process)
 btn_save.on_click(do_save)
 
 ui = widgets.VBox([
-    widgets.HTML("<h4>🛡️ AER Generator v5.8 (Interactive)</h4>"), 
+    widgets.HTML("<h4>🛡️ AER Generator v5.9 (Interactive)</h4>"), 
     widgets.HBox([up_list, txt_list]), 
     widgets.HBox([up_map, txt_map]), 
     widgets.HBox([btn_process, btn_save], layout=widgets.Layout(margin='15px 0')), 
     out_area
 ])
 
-# Fix: Only display once
 clear_output()
 display(ui)
