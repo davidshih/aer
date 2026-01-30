@@ -1,5 +1,5 @@
 def preload_ad_cache(progress_widget=None, status_widget=None):
-    """Preload all active AD users into cache (v6.5) - Fixed for API Limits"""
+    """Preload all active AD users into cache (v6.5) - Fixed for API Limits & Null Emails"""
     global ad_full_cache, name_to_email_index, ad_cache_loaded
     
     if not headers:
@@ -66,9 +66,12 @@ def preload_ad_cache(progress_widget=None, status_widget=None):
             if progress_widget:
                 progress_widget.value = i + 1
             
-            email = user.get('mail', '').lower().strip()
-            if not email:
+            # FIXED: Handle NoneType explicitly (API returns null for some users)
+            raw_email = user.get('mail')
+            if not raw_email:
                 continue
+                
+            email = str(raw_email).lower().strip()
             
             display_name = user.get('displayName', 'N/A')
             
