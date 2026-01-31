@@ -1,0 +1,442 @@
+# === CELL 1.5: Org Tree Builder (v7.3 - Manager Hierarchy Tree View) ===
+import os, glob, logging, io, math
+import pandas as pd
+import ipywidgets as widgets
+from datetime import datetime
+from IPython.display import display, HTML, clear_output
+
+# Constants
+CORP_PREFIX = "corporate"
+MAX_TREE_LEVELS = 4  # Steven Bush = Level 1, then 3 more levels
+
+# Paths
+today_str = datetime.now().strftime('%Y-%m-%d')
+BASE_DIR = os.path.join("output", today_str)
+AD_CACHE_DIR = os.path.join(BASE_DIR, "ad_cache")
+ORG_DIR = os.path.join(BASE_DIR, "orgchart")
+MAP_DIR = os.path.join("input", "mapping")
+LOG_DIR = os.path.join(BASE_DIR, "logs")
+os.makedirs(ORG_DIR, exist_ok=True)
+os.makedirs(MAP_DIR, exist_ok=True)
+
+# Logging
+log_file = os.path.join(LOG_DIR, f"aer_stage1_5_{datetime.now().strftime('%Y%m%d_%H%M')}.log")
+logger_s15 = logging.getLogger("aer_stage1_5")
+logger_s15.handlers.clear()
+logger_s15.setLevel(logging.INFO)
+formatter = logging.Formatter('%(asctime)s | %(levelname)s | %(message)s')
+fh = logging.FileHandler(log_file, encoding="utf-8")
+fh.setFormatter(formatter)
+logger_s15.addHandler(fh)
+logger_s15.addHandler(logging.StreamHandler(sys.stdout))
+
+# Globals
+s15_ad_df = None
+s15_tree_html = widgets.HTML()
+s15_status = widgets.HTML(value="<i>Load AD cache to build org tree</i>")
+s15_output = widgets.Output()
+drop_head = widgets.Dropdown(description='Dept Head', options=[], layout=widgets.Layout(width='75%'))
+txt_reviewer_email = widgets.Text(description='Reviewer', placeholder='email@example.com', layout=widgets.Layout(width='50%'))
+txt_department = widgets.Text(description='Dept', layout=widgets.Layout(width='50%'))
+btn_add = widgets.Button(description='➕ Add/Update Mapping', button_style='warning', layout=widgets.Layout(width='220px'))
+btn_save = widgets.Button(description='💾 Save Mapping', button_style='success', layout=widgets.Layout(width='160px'))
+btn_refresh = widgets.Button(description='🔄 Rebuild Tree', button_style='info', layout=widgets.Layout(width='140px'))
+mapping_table = widgets.HTML()
+
+s15_mapping_rows = []
+
+# ========== HELPER FUNCTIONS ==========
+
+def normalize_department(dept):
+    """Normalize department name"""
+    if dept is None or (isinstance(dept, float) and math.isnan(dept)):
+        dept = ''
+    else:
+        dept = str(dept).strip()
+    if dept.lower().startswith('branch'):
+        return 'Branch'
+    return dept or 'N/A'
+
+def load_latest_ad():
+    """Load latest AD cache file"""
+    try:
+        cache_files = glob.glob(os.path.join(AD_CACHE_DIR, "ad_users_*.csv"))
+        if not cache_files:
+            return None, "No AD cache found. Run Stage 1 first."
+        latest = max(cache_files, key=os.path.getmtime)
+        df = pd.read_csv(latest)
+        # Filter corporate users only
+        df = df[df['department'].fillna('').str.lower().str.startswith(CORP_PREFIX)]
+        return df, f"Loaded {len(df)} corporate users from {os.path.basename(latest)}"
+    except Exception as e:
+        return None, f"Error loading AD cache: {e}"
+
+def find_root(df):
+    """Find CEO (Steven/Steve Bush) as root"""
+    names = df['displayName'].str.lower().fillna('').str.strip()
+    
+    # Try exact name match first
+    mask_name = names.isin(['steven bush', 'steve bush'])
+    if mask_name.any():
+        return df.loc[mask_name, 'email'].iloc[0]
+    
+    # Try title match
+    mask_title = df['jobTitle'].str.lower().fillna('').str.contains('chief executive|ceo|president')
+    if mask_title.any():
+        return df.loc[mask_title, 'email'].iloc[0]
+    
+    # Find person with no manager
+    mask_nomgr = df['managerEmail'].fillna('N/A') == 'N/A'
+    if mask_nomgr.any():
+        return df.loc[mask_nomgr, 'email'].iloc[0]
+    
+    return df.iloc[0]['email'] if len(df) else None
+
+def build_org_structure(df, root_email):
+    """
+    Build organization structure:
+    - nodes: dict of email -> user info
+    - children: dict of manager_email -> list of direct reports
+    - levels: dict of email -> level (root=1, direct reports=2, etc.)
+    """
+    df = df.copy()
+    df['managerEmail'] = df['managerEmail'].fillna('N/A')
+    
+    # Build nodes dict
+    nodes = {}
+    for _, row in df.iterrows():
+        nodes[row['email']] = {
+            'email': row['email'],
+            'name': row['displayName'],
+            'title': row.get('jobTitle', 'N/A'),
+            'dept': normalize_department(row.get('department')),
+            'manager': row['managerEmail']
+        }
+    
+    # Build children dict (manager -> list of reports)
+    children = {}
+    for email, node in nodes.items():
+        mgr = node['manager']
+        if mgr == 'N/A' or mgr not in nodes:
+            # If no valid manager, attach to root
+            if email != root_email:
+                children.setdefault(root_email, []).append(email)
+        else:
+            children.setdefault(mgr, []).append(email)
+    
+    # Calculate levels (BFS from root)
+    levels = {root_email: 1}
+    queue = [root_email]
+    
+    while queue:
+        current = queue.pop(0)
+        current_level = levels[current]
+        
+        if current_level >= MAX_TREE_LEVELS:
+            continue
+        
+        for child in children.get(current, []):
+            if child not in levels:  # Avoid cycles
+                levels[child] = current_level + 1
+                queue.append(child)
+    
+    return nodes, children, levels
+
+def find_dept_heads(df, nodes, levels):
+    """
+    Find head of each department based on reporting structure.
+    Dept head = person in dept with lowest level (closest to root)
+    """
+    dept_heads = {}
+    
+    for dept_name, grp in df.groupby(df['department'].apply(normalize_department)):
+        if dept_name == 'N/A':
+            continue
+        
+        # Find all people in this dept who have a level assigned
+        dept_people = []
+        for _, row in grp.iterrows():
+            email = row['email']
+            if email in levels:
+                dept_people.append({
+                    'email': email,
+                    'level': levels[email],
+                    'name': row['displayName'],
+                    'title': row.get('jobTitle', 'N/A')
+                })
+        
+        if not dept_people:
+            continue
+        
+        # Sort by level (ascending) - lowest level = closest to root = dept head
+        dept_people.sort(key=lambda x: x['level'])
+        head = dept_people[0]
+        
+        # Find reviewer (the head's manager who is NOT in same dept)
+        head_email = head['email']
+        reviewer_email = nodes[head_email]['manager']
+        
+        # Walk up until we find manager in different dept or reach root
+        while reviewer_email in nodes and reviewer_email != 'N/A':
+            reviewer_node = nodes[reviewer_email]
+            if reviewer_node['dept'] != dept_name:
+                break
+            reviewer_email = reviewer_node['manager']
+        
+        dept_heads[dept_name] = {
+            'head_email': head_email,
+            'head_name': head['name'],
+            'head_title': head['title'],
+            'head_level': head['level'],
+            'reviewer_email': reviewer_email if reviewer_email in nodes else head_email
+        }
+    
+    return dept_heads
+
+def render_manager_tree_html(root_email, nodes, children, levels, max_level=MAX_TREE_LEVELS):
+    """
+    Render manager hierarchy tree as HTML
+    """
+    def render_node(email, current_level):
+        """Recursively render a node and its children"""
+        if current_level > max_level:
+            return ""
+        
+        if email not in nodes:
+            return ""
+        
+        node = nodes[email]
+        level_num = levels.get(email, 0)
+        
+        # Node label - Department shown right after name
+        dept_label = f"<span style='color:#2196F3;font-weight:600;'>({node['dept']})</span>"
+        label = f"<b>{node['name']}</b> {dept_label} • {node['title']}"
+        email_text = f"<span style='color:#666;font-size:0.9em;'>{email}</span>"
+        
+        # Level badge
+        level_badge = f"<span style='background:#4CAF50;color:white;padding:2px 6px;border-radius:3px;font-size:0.8em;margin-left:8px;'>L{level_num}</span>"
+        
+        # Get children
+        kids = children.get(email, [])
+        kids_in_range = [k for k in kids if k in levels and levels[k] <= max_level]
+        
+        if not kids_in_range:
+            # Leaf node
+            return f"<li>👤 {label} {level_badge}<br>{email_text}</li>"
+        else:
+            # Node with children - use collapsible details
+            kids_html = "".join([render_node(kid, current_level + 1) for kid in kids_in_range])
+            return f"""
+            <details open>
+                <summary style='cursor:pointer;padding:4px 0;'>
+                    👤 {label} {level_badge}<br>
+                    <span style='padding-left:20px;'>{email_text}</span>
+                </summary>
+                <ul style='list-style:none;padding-left:24px;border-left:2px solid #ddd;margin:4px 0;'>
+                    {kids_html}
+                </ul>
+            </details>
+            """
+    
+    tree_html = f"""
+    <div style='font-family:monospace;font-size:0.95em;'>
+        <h4>🌳 Manager Hierarchy Tree (4 Levels)</h4>
+        <p style='color:#666;font-size:0.9em;'>Click to expand/collapse • L1 = CEO, L2 = Direct Reports, L3-L4 = Lower levels</p>
+        <ul style='list-style:none;padding-left:0;'>
+            {render_node(root_email, 1)}
+        </ul>
+    </div>
+    """
+    
+    return tree_html
+
+# ========== REFRESH TREE + MAPPING ==========
+
+def refresh_tree(_=None):
+    """Refresh org tree and auto-generate mapping"""
+    global s15_ad_df, s15_mapping_rows
+    
+    s15_output.clear_output()
+    
+    # Load AD data
+    df, msg = load_latest_ad()
+    if df is None:
+        s15_status.value = f"<span style='color:red;'>❌ {msg}</span>"
+        return
+    
+    s15_ad_df = df
+    
+    # Find root
+    root_email = find_root(df)
+    if not root_email:
+        s15_status.value = '<span style="color:red;">❌ Could not locate root (CEO)</span>'
+        return
+    
+    # Build org structure
+    nodes, children, levels = build_org_structure(df, root_email)
+    
+    # Find department heads
+    dept_heads = find_dept_heads(df, nodes, levels)
+    
+    # Update dropdown options
+    opts = []
+    for dept_name, info in sorted(dept_heads.items()):
+        label = f"{dept_name} | {info['head_name']} (L{info['head_level']}) | {info['head_title']} | {info['head_email']}"
+        opts.append((label, info['head_email']))
+    drop_head.options = opts
+    
+    # Auto-generate mapping
+    s15_mapping_rows = []
+    for dept_name, info in dept_heads.items():
+        head_email = info['head_email']
+        reviewer_email = info['reviewer_email']
+        
+        # Determine if branch
+        branch_val = '' if dept_name.lower().startswith('corporate') else 'Branch'
+        
+        # Add two rows per dept:
+        # 1. dept head -> reviewer (head's manager)
+        s15_mapping_rows.append({
+            'email': head_email,
+            'department': dept_name,
+            'reviewer': reviewer_email,
+            'branch': branch_val
+        })
+        
+        # 2. wildcard -> dept head
+        s15_mapping_rows.append({
+            'email': '*',
+            'department': dept_name,
+            'reviewer': head_email,
+            'branch': branch_val
+        })
+    
+    render_mapping()
+    
+    # Render tree
+    tree_html = render_manager_tree_html(root_email, nodes, children, levels)
+    s15_tree_html.value = f"""
+    <div style='max-height:600px;overflow:auto;border:1px solid #ddd;padding:12px;background:#f9f9f9;border-radius:4px;'>
+        {tree_html}
+    </div>
+    """
+    
+    s15_status.value = f"<span style='color:green;'>✅ {msg}</span>"
+    logger_s15.info(msg)
+    logger_s15.info(f"Found {len(dept_heads)} departments with heads")
+    
+    with s15_output:
+        print(f"✅ Org tree built: {len(nodes)} people, {len(dept_heads)} departments")
+        print(f"📊 Root: {nodes[root_email]['name']} ({root_email})")
+        print(f"🌳 Levels 1-{MAX_TREE_LEVELS} shown")
+
+# ========== MAPPING TABLE RENDER ==========
+
+def render_mapping():
+    """Render mapping table"""
+    if not s15_mapping_rows:
+        mapping_table.value = "<i>No mappings added yet</i>"
+        return
+    
+    df = pd.DataFrame(s15_mapping_rows)
+    cols = ['email', 'department', 'reviewer', 'branch']
+    for c in cols:
+        if c not in df.columns:
+            df[c] = ''
+    
+    # Add styling
+    html = df[cols].to_html(index=False, escape=False)
+    html = html.replace('<table', '<table style="width:100%;border-collapse:collapse;"')
+    html = html.replace('<th>', '<th style="background:#4CAF50;color:white;padding:8px;text-align:left;">')
+    html = html.replace('<td>', '<td style="padding:6px;border:1px solid #ddd;">')
+    
+    mapping_table.value = html
+
+# ========== EVENT HANDLERS ==========
+
+def on_head_change(change):
+    """When dept head dropdown changes, auto-fill fields"""
+    if not change['new'] or s15_ad_df is None:
+        return
+    
+    row = s15_ad_df.loc[s15_ad_df['email'] == change['new']].iloc[0]
+    dept = normalize_department(row.get('department'))
+    txt_department.value = dept
+    txt_reviewer_email.value = row.get('email', '')
+
+def on_add_clicked(_):
+    """Add/update custom mapping"""
+    if not txt_department.value or not txt_reviewer_email.value:
+        s15_status.value = "<span style='color:red;'>❌ Department and reviewer email required</span>"
+        return
+    
+    dept = normalize_department(txt_department.value)
+    reviewer = txt_reviewer_email.value.strip().lower()
+    email = drop_head.value
+    branch_val = '' if dept.lower().startswith('corporate') else 'Branch'
+    
+    new_rows = [
+        {'email': email or reviewer, 'department': dept, 'reviewer': reviewer, 'branch': branch_val},
+        {'email': '*', 'department': dept, 'reviewer': email or reviewer, 'branch': branch_val}
+    ]
+    
+    # Remove old rows for this dept
+    s15_mapping_rows[:] = [r for r in s15_mapping_rows if r.get('department', '').lower() != dept.lower()]
+    s15_mapping_rows.extend(new_rows)
+    
+    s15_status.value = f"<span style='color:blue;'>✅ Mapping updated for {dept}</span>"
+    render_mapping()
+
+def on_save_clicked(_):
+    """Save mapping to CSV"""
+    if not s15_mapping_rows:
+        s15_status.value = "<span style='color:red;'>❌ No mappings to save</span>"
+        return
+    
+    df = pd.DataFrame(s15_mapping_rows)
+    ts = datetime.now().strftime('%Y%m%d_%H%M')
+    path = os.path.join(MAP_DIR, f"org_mapping_{ts}.csv")
+    df.to_csv(path, index=False)
+    
+    s15_status.value = f"<span style='color:green;'>💾 Saved mapping to {path}</span>"
+    logger_s15.info(f"Mapping saved to {path}")
+
+# ========== BIND EVENTS ==========
+drop_head.observe(on_head_change, names='value')
+btn_add.on_click(on_add_clicked)
+btn_save.on_click(on_save_clicked)
+btn_refresh.on_click(refresh_tree)
+
+# ========== UI LAYOUT ==========
+stage15_ui = widgets.VBox([
+    widgets.HTML("""
+        <div style='
+            background: linear-gradient(135deg, #5ee7df 0%, #b490ca 100%);
+            padding: 20px;
+            border-radius: 8px;
+            color: white;
+            margin-bottom: 20px;
+        '>
+            <h2 style='margin: 0 0 10px 0;'>🌳 Stage 1.5: Org Tree Builder (Manager Hierarchy)</h2>
+            <p style='margin: 0; opacity: 0.9;'>
+                4-level manager tree • Steven Bush (L1) → Direct Reports (L2-L4) • Dept heads by reporting structure
+            </p>
+        </div>
+    """),
+    widgets.HBox([btn_refresh, s15_status]),
+    s15_tree_html,
+    widgets.HTML('<hr style="margin:20px 0;"><h4>📋 Department Reviewer Mapping</h4>'),
+    mapping_table,
+    widgets.HTML('<hr style="margin:20px 0;"><h4>✏️ Manual Override (Optional)</h4>'),
+    widgets.HBox([drop_head]),
+    widgets.HBox([txt_department, txt_reviewer_email]),
+    widgets.HBox([btn_add, btn_save]),
+    s15_output
+])
+
+clear_output()
+display(stage15_ui)
+refresh_tree()
+
+logger_s15.info("Stage 1.5 UI initialized")
+logger_s15.info("="*60)
