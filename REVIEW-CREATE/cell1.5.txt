@@ -258,77 +258,189 @@ def refresh_tree(_=None):
     
     s15_output.clear_output()
     
-    # Load AD data
-    df, msg = load_latest_ad()
-    if df is None:
-        s15_status.value = f"<span style='color:red;'>❌ {msg}</span>"
-        return
-    
-    s15_ad_df = df
-    
-    # Find root
-    root_email = find_root(df)
-    if not root_email:
-        s15_status.value = '<span style="color:red;">❌ Could not locate root (CEO)</span>'
-        return
-    
-    # Build org structure
-    nodes, children, levels = build_org_structure(df, root_email)
-    
-    # Find department heads
-    dept_heads = find_dept_heads(df, nodes, levels)
-    
-    # Update dropdown options
-    opts = []
-    for dept_name, info in sorted(dept_heads.items()):
-        label = f"{dept_name} | {info['head_name']} (L{info['head_level']}) | {info['head_title']} | {info['head_email']}"
-        opts.append((label, info['head_email']))
-    drop_head.options = opts
-    
-    # Auto-generate mapping
-    s15_mapping_rows = []
-    for dept_name, info in dept_heads.items():
-        head_email = info['head_email']
-        reviewer_email = info['reviewer_email']
-        
-        # Determine if branch
-        branch_val = '' if dept_name.lower().startswith('corporate') else 'Branch'
-        
-        # Add two rows per dept:
-        # 1. dept head -> reviewer (head's manager)
-        s15_mapping_rows.append({
-            'email': head_email,
-            'department': dept_name,
-            'reviewer': reviewer_email,
-            'branch': branch_val
-        })
-        
-        # 2. wildcard -> dept head
-        s15_mapping_rows.append({
-            'email': '*',
-            'department': dept_name,
-            'reviewer': head_email,
-            'branch': branch_val
-        })
-    
-    render_mapping()
-    
-    # Render tree
-    tree_html = render_manager_tree_html(root_email, nodes, children, levels)
-    s15_tree_html.value = f"""
-    <div style='max-height:600px;overflow:auto;border:1px solid #ddd;padding:12px;background:#f9f9f9;border-radius:4px;'>
-        {tree_html}
-    </div>
-    """
-    
-    s15_status.value = f"<span style='color:green;'>✅ {msg}</span>"
-    logger_s15.info(msg)
-    logger_s15.info(f"Found {len(dept_heads)} departments with heads")
+    # Create progress display
+    progress = widgets.IntProgress(
+        value=0,
+        min=0,
+        max=100,
+        description='Building:',
+        bar_style='info',
+        layout=widgets.Layout(width='80%')
+    )
+    status_label = widgets.HTML(value="Initializing...")
+    progress_box = widgets.VBox([progress, status_label])
     
     with s15_output:
-        print(f"✅ Org tree built: {len(nodes)} people, {len(dept_heads)} departments")
-        print(f"📊 Root: {nodes[root_email]['name']} ({root_email})")
-        print(f"🌳 Levels 1-{MAX_TREE_LEVELS} shown")
+        display(progress_box)
+        print("\n" + "="*60)
+        print("🌳 Building Organization Tree")
+        print("="*60 + "\n")
+    
+    try:
+        # Step 1: Load AD data
+        status_label.value = "📂 Loading AD cache file..."
+        progress.value = 10
+        
+        cache_files = glob.glob(os.path.join(AD_CACHE_DIR, "ad_users_*.csv"))
+        if not cache_files:
+            s15_status.value = "<span style='color:red;'>❌ No AD cache found. Run Stage 1 first.</span>"
+            return
+        
+        latest_cache = max(cache_files, key=os.path.getmtime)
+        cache_filename = os.path.basename(latest_cache)
+        
+        with s15_output:
+            print(f"📂 Using cache: {cache_filename}")
+        
+        df = pd.read_csv(latest_cache)
+        total_users = len(df)
+        
+        with s15_output:
+            print(f"   Total users in cache: {total_users}")
+        
+        progress.value = 20
+        status_label.value = "🔍 Filtering corporate users..."
+        
+        # Filter corporate users
+        df = df[df['department'].fillna('').str.lower().str.startswith(CORP_PREFIX)]
+        corp_users = len(df)
+        
+        with s15_output:
+            print(f"   Corporate users: {corp_users}\n")
+        
+        if corp_users == 0:
+            s15_status.value = "<span style='color:red;'>❌ No corporate users found in cache</span>"
+            return
+        
+        s15_ad_df = df
+        
+        # Step 2: Find root (CEO)
+        progress.value = 30
+        status_label.value = "👑 Locating CEO (Steven Bush)..."
+        
+        root_email = find_root(df)
+        if not root_email:
+            s15_status.value = '<span style="color:red;">❌ Could not locate root (CEO)</span>'
+            return
+        
+        root_row = df[df['email'] == root_email].iloc[0]
+        with s15_output:
+            print(f"👑 CEO Found: {root_row['displayName']} ({root_email})")
+            print(f"   Title: {root_row.get('jobTitle', 'N/A')}\n")
+        
+        # Step 3: Build org structure
+        progress.value = 40
+        status_label.value = "🏗️ Building manager hierarchy..."
+        
+        with s15_output:
+            print("🏗️ Building organization structure...")
+        
+        nodes, children, levels = build_org_structure(df, root_email)
+        
+        with s15_output:
+            print(f"   ✓ Nodes created: {len(nodes)}")
+            print(f"   ✓ Manager relationships: {len(children)}")
+            print(f"   ✓ Levels assigned: {len(levels)}\n")
+        
+        # Step 4: Find department heads
+        progress.value = 60
+        status_label.value = "📊 Identifying department heads..."
+        
+        with s15_output:
+            print("📊 Analyzing department structure...")
+        
+        dept_heads = find_dept_heads(df, nodes, levels)
+        
+        with s15_output:
+            print(f"   ✓ Departments found: {len(dept_heads)}")
+            for dept_name, info in sorted(dept_heads.items()):
+                print(f"      • {dept_name}: {info['head_name']} (L{info['head_level']})")
+            print()
+        
+        # Step 5: Update dropdown
+        progress.value = 70
+        status_label.value = "📋 Populating dropdown options..."
+        
+        opts = []
+        for dept_name, info in sorted(dept_heads.items()):
+            label = f"{dept_name} | {info['head_name']} (L{info['head_level']}) | {info['head_title']} | {info['head_email']}"
+            opts.append((label, info['head_email']))
+        drop_head.options = opts
+        
+        # Step 6: Generate mapping
+        progress.value = 80
+        status_label.value = "🗺️ Auto-generating reviewer mapping..."
+        
+        with s15_output:
+            print("🗺️ Generating reviewer mapping...")
+        
+        s15_mapping_rows = []
+        for dept_name, info in dept_heads.items():
+            head_email = info['head_email']
+            reviewer_email = info['reviewer_email']
+            
+            branch_val = '' if dept_name.lower().startswith('corporate') else 'Branch'
+            
+            s15_mapping_rows.append({
+                'email': head_email,
+                'department': dept_name,
+                'reviewer': reviewer_email,
+                'branch': branch_val
+            })
+            
+            s15_mapping_rows.append({
+                'email': '*',
+                'department': dept_name,
+                'reviewer': head_email,
+                'branch': branch_val
+            })
+        
+        with s15_output:
+            print(f"   ✓ Mapping rows generated: {len(s15_mapping_rows)}\n")
+        
+        render_mapping()
+        
+        # Step 7: Render tree HTML
+        progress.value = 90
+        status_label.value = "🎨 Rendering tree visualization..."
+        
+        with s15_output:
+            print("🎨 Rendering tree HTML...")
+        
+        tree_html = render_manager_tree_html(root_email, nodes, children, levels)
+        s15_tree_html.value = f"""
+        <div style='max-height:600px;overflow:auto;border:1px solid #ddd;padding:12px;background:#f9f9f9;border-radius:4px;'>
+            {tree_html}
+        </div>
+        """
+        
+        # Step 8: Complete
+        progress.value = 100
+        progress.bar_style = 'success'
+        status_label.value = "<span style='color:green;font-weight:bold;'>✅ Complete!</span>"
+        
+        with s15_output:
+            print("="*60)
+            print("✅ Organization Tree Built Successfully")
+            print("="*60)
+            print(f"📊 Summary:")
+            print(f"   • Total users processed: {len(nodes)}")
+            print(f"   • Departments: {len(dept_heads)}")
+            print(f"   • Levels: 1-{MAX_TREE_LEVELS}")
+            print(f"   • Mapping entries: {len(s15_mapping_rows)}")
+            print(f"   • Cache file: {cache_filename}")
+            print("="*60)
+        
+        s15_status.value = f"<span style='color:green;'>✅ Tree built: {len(nodes)} users, {len(dept_heads)} depts</span>"
+        logger_s15.info(f"Tree built successfully: {len(nodes)} users, {len(dept_heads)} departments")
+        
+    except Exception as e:
+        progress.bar_style = 'danger'
+        status_label.value = f"<span style='color:red;'>❌ Error: {str(e)}</span>"
+        with s15_output:
+            print(f"\n❌ Error building tree: {str(e)}")
+        logger_s15.error(f"Tree build error: {str(e)}", exc_info=True)
+        s15_status.value = f"<span style='color:red;'>❌ Error: {str(e)}</span>"
 
 # ========== MAPPING TABLE RENDER ==========
 
