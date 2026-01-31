@@ -44,6 +44,7 @@ btn_refresh = widgets.Button(description='🔄 Rebuild Tree', button_style='info
 mapping_table = widgets.HTML()
 
 s15_mapping_rows = []
+s15_is_building = False  # Execution lock to prevent duplicate runs
 
 # ========== HELPER FUNCTIONS ==========
 
@@ -102,9 +103,12 @@ def build_org_structure(df, root_email):
     df = df.copy()
     df['managerEmail'] = df['managerEmail'].fillna('N/A')
     
+    with s15_output:
+        print(f"   Building nodes for {len(df)} users...")
+    
     # Build nodes dict
     nodes = {}
-    for _, row in df.iterrows():
+    for idx, row in df.iterrows():
         nodes[row['email']] = {
             'email': row['email'],
             'name': row['displayName'],
@@ -112,21 +116,40 @@ def build_org_structure(df, root_email):
             'dept': normalize_department(row.get('department')),
             'manager': row['managerEmail']
         }
+        
+        if (idx + 1) % 100 == 0:
+            with s15_output:
+                print(f"      • Processed {idx + 1}/{len(df)} nodes...")
+    
+    with s15_output:
+        print(f"   Building manager-report relationships...")
     
     # Build children dict (manager -> list of reports)
     children = {}
+    orphan_count = 0
+    
     for email, node in nodes.items():
         mgr = node['manager']
         if mgr == 'N/A' or mgr not in nodes:
             # If no valid manager, attach to root
             if email != root_email:
                 children.setdefault(root_email, []).append(email)
+                orphan_count += 1
         else:
             children.setdefault(mgr, []).append(email)
     
+    with s15_output:
+        print(f"      ✓ Relationships created: {len(children)}")
+        if orphan_count > 0:
+            print(f"      ⚠️ Orphaned users attached to root: {orphan_count}")
+    
     # Calculate levels (BFS from root)
+    with s15_output:
+        print(f"   Calculating levels via BFS from root...")
+    
     levels = {root_email: 1}
     queue = [root_email]
+    processed = 0
     
     while queue:
         current = queue.pop(0)
@@ -139,6 +162,23 @@ def build_org_structure(df, root_email):
             if child not in levels:  # Avoid cycles
                 levels[child] = current_level + 1
                 queue.append(child)
+                processed += 1
+                
+                if processed % 50 == 0:
+                    with s15_output:
+                        print(f"      • Assigned levels: {processed}...")
+    
+    with s15_output:
+        print(f"      ✓ Levels assigned: {len(levels)}")
+        
+        # Show level distribution
+        level_counts = {}
+        for email, level in levels.items():
+            level_counts[level] = level_counts.get(level, 0) + 1
+        
+        print(f"      📊 Level distribution:")
+        for lvl in sorted(level_counts.keys()):
+            print(f"         L{lvl}: {level_counts[lvl]} people")
     
     return nodes, children, levels
 
@@ -149,9 +189,17 @@ def find_dept_heads(df, nodes, levels):
     """
     dept_heads = {}
     
+    with s15_output:
+        print(f"   Processing {len(df['department'].unique())} unique departments...")
+    
+    dept_count = 0
     for dept_name, grp in df.groupby(df['department'].apply(normalize_department)):
+        dept_count += 1
         if dept_name == 'N/A':
             continue
+        
+        with s15_output:
+            print(f"   [{dept_count}] Analyzing: {dept_name} ({len(grp)} people)")
         
         # Find all people in this dept who have a level assigned
         dept_people = []
@@ -166,29 +214,60 @@ def find_dept_heads(df, nodes, levels):
                 })
         
         if not dept_people:
+            with s15_output:
+                print(f"       ⚠️ No people with levels in {dept_name}, skipping")
             continue
         
         # Sort by level (ascending) - lowest level = closest to root = dept head
         dept_people.sort(key=lambda x: x['level'])
         head = dept_people[0]
         
+        with s15_output:
+            print(f"       ✓ Head: {head['name']} (L{head['level']})")
+        
         # Find reviewer (the head's manager who is NOT in same dept)
         head_email = head['email']
         reviewer_email = nodes[head_email]['manager']
         
-        # Walk up until we find manager in different dept or reach root
-        while reviewer_email in nodes and reviewer_email != 'N/A':
-            reviewer_node = nodes[reviewer_email]
-            if reviewer_node['dept'] != dept_name:
+        # IMPORTANT: Add protection against infinite loop
+        visited = set()
+        max_hops = 10  # Safety limit
+        hops = 0
+        
+        while reviewer_email in nodes and reviewer_email != 'N/A' and hops < max_hops:
+            if reviewer_email in visited:
+                # Circular reference detected!
+                with s15_output:
+                    print(f"       ⚠️ Circular manager reference detected, using current as reviewer")
                 break
+            
+            visited.add(reviewer_email)
+            reviewer_node = nodes[reviewer_email]
+            
+            # If manager is in different dept, use them as reviewer
+            if reviewer_node['dept'] != dept_name:
+                with s15_output:
+                    print(f"       ✓ Reviewer: {reviewer_node['name']} ({reviewer_email})")
+                break
+            
+            # Go up one more level
             reviewer_email = reviewer_node['manager']
+            hops += 1
+        
+        # If we couldn't find a good reviewer, use the head's manager or the head itself
+        if reviewer_email == 'N/A' or reviewer_email not in nodes or hops >= max_hops:
+            reviewer_email = nodes[head_email]['manager']
+            if reviewer_email == 'N/A' or reviewer_email not in nodes:
+                reviewer_email = head_email
+            with s15_output:
+                print(f"       ⚠️ Using fallback reviewer: {reviewer_email}")
         
         dept_heads[dept_name] = {
             'head_email': head_email,
             'head_name': head['name'],
             'head_title': head['title'],
             'head_level': head['level'],
-            'reviewer_email': reviewer_email if reviewer_email in nodes else head_email
+            'reviewer_email': reviewer_email
         }
     
     return dept_heads
@@ -254,7 +333,16 @@ def render_manager_tree_html(root_email, nodes, children, levels, max_level=MAX_
 
 def refresh_tree(_=None):
     """Refresh org tree and auto-generate mapping"""
-    global s15_ad_df, s15_mapping_rows
+    global s15_ad_df, s15_mapping_rows, s15_is_building
+    
+    # Prevent duplicate execution
+    if s15_is_building:
+        with s15_output:
+            print("⚠️ Already building tree, please wait...")
+        return
+    
+    s15_is_building = True
+    btn_refresh.disabled = True
     
     s15_output.clear_output()
     
@@ -441,6 +529,9 @@ def refresh_tree(_=None):
             print(f"\n❌ Error building tree: {str(e)}")
         logger_s15.error(f"Tree build error: {str(e)}", exc_info=True)
         s15_status.value = f"<span style='color:red;'>❌ Error: {str(e)}</span>"
+    finally:
+        s15_is_building = False
+        btn_refresh.disabled = False
 
 # ========== MAPPING TABLE RENDER ==========
 
@@ -548,7 +639,10 @@ stage15_ui = widgets.VBox([
 
 clear_output()
 display(stage15_ui)
-refresh_tree()
+
+# Don't auto-refresh on load - let user click the button
+# refresh_tree()  # REMOVED: Causes multiple executions
 
 logger_s15.info("Stage 1.5 UI initialized")
 logger_s15.info("="*60)
+print("\n✅ Stage 1.5 UI ready - Click '🔄 Rebuild Tree' to start")
