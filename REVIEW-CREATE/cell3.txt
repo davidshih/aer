@@ -1,0 +1,808 @@
+# === CELL 3: Email/User Validation with Ultra Validation (v7.5) ===
+import os, sys, logging, glob, io, re, unicodedata
+import pandas as pd
+import ipywidgets as widgets
+from datetime import datetime
+from IPython.display import display, HTML, clear_output
+
+# Try import fuzzy matching
+try:
+    from rapidfuzz import fuzz, process
+    FUZZY_AVAILABLE = True
+except ImportError:
+    try:
+        from fuzzywuzzy import fuzz, process
+        FUZZY_AVAILABLE = True
+        print("⚠️ Using fuzzywuzzy. Install rapidfuzz for better performance: pip install rapidfuzz")
+    except ImportError:
+        FUZZY_AVAILABLE = False
+        print("❌ Fuzzy matching unavailable. Install: pip install rapidfuzz")
+
+# Setup paths
+today_str = datetime.now().strftime('%Y-%m-%d')
+BASE_DIR = os.path.join("output", today_str)
+AD_CACHE_DIR = os.path.join(BASE_DIR, "ad_cache")
+STAGE2_DIR = os.path.join(BASE_DIR, "stage2_validated")
+LOG_DIR = os.path.join(BASE_DIR, "logs")
+os.makedirs(STAGE2_DIR, exist_ok=True)
+
+# Logging
+log_file = os.path.join(LOG_DIR, f"aer_stage2_{datetime.now().strftime('%Y%m%d_%H%M')}.log")
+logger_s2 = logging.getLogger("aer_stage2")
+logger_s2.handlers.clear()
+logger_s2.setLevel(logging.INFO)
+formatter = logging.Formatter('%(asctime)s | %(levelname)s | %(message)s')
+fh = logging.FileHandler(log_file, encoding="utf-8")
+fh.setFormatter(formatter)
+logger_s2.addHandler(fh)
+logger_s2.addHandler(logging.StreamHandler(sys.stdout))
+
+# ========== GLOBAL STATE ==========
+s2_ad_cache = {}  # email -> user data
+s2_name_index = {}  # normalized_name -> email
+s2_input_df = None
+s2_input_filename = ""
+s2_validated_rows = []  # List of validated user dicts
+s2_review_rows = []  # Rows needing manual review
+s2_is_processing = False
+
+# Validation categories
+CATEGORIES = {
+    'PERFECT_MATCH': '✅ Perfect Match',
+    'AUTO_FILLED_NAME': '✅ Auto-filled Name',
+    'AUTO_FILLED_EMAIL': '✅ Auto-filled Email',
+    'MISMATCH_EMAIL_PRIORITY': '⚠️ Mismatch (Email Priority)',
+    'AMBIGUOUS_NAME': '⚠️ Ambiguous Name Match',
+    'INACTIVE_ACCOUNT': '⚠️ Inactive Account',
+    'NOT_FOUND': '❌ Not Found in AD',
+    'INVALID_FORMAT': '❌ Invalid Email Format',
+    'BOTH_EMPTY': '❌ Both Empty (Skipped)'
+}
+
+# ========== UI COMPONENTS ==========
+s2_upload = widgets.FileUpload(
+    accept='.xlsx, .csv',
+    description="Upload User List",
+    button_style='info'
+)
+s2_upload_status = widgets.HTML(value="<i>No file selected</i>")
+s2_btn_validate = widgets.Button(
+    description="🔍 Validate Users",
+    button_style='warning',
+    layout=widgets.Layout(width='180px'),
+    disabled=True
+)
+s2_btn_save = widgets.Button(
+    description="💾 Save Validated File",
+    button_style='success',
+    layout=widgets.Layout(width='180px'),
+    disabled=True
+)
+s2_status = widgets.HTML(value="<i>Please load AD cache and upload user list</i>")
+s2_output = widgets.Output()
+s2_review_container = widgets.VBox()
+
+# ========== HELPER FUNCTIONS ==========
+
+def normalize_email(email):
+    """Normalize email to lowercase, strip whitespace"""
+    if pd.isna(email) or not email:
+        return None
+    email_str = str(email).strip().lower()
+    # Check for null variants
+    if email_str in ['nan', 'none', '', 'n/a', 'na', '-', 'null']:
+        return None
+    return email_str
+
+def is_valid_email_format(email):
+    """Check if email has valid format"""
+    if not email:
+        return False
+    # Basic email regex
+    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    return re.match(pattern, email) is not None
+
+def normalize_name(name):
+    """Normalize name for matching"""
+    if pd.isna(name) or not name:
+        return None
+    name_str = str(name).strip()
+    # Check for null variants
+    if name_str.lower() in ['nan', 'none', '', 'n/a', 'na', '-', 'null']:
+        return None
+    # Normalize unicode
+    name_str = unicodedata.normalize('NFKC', name_str)
+    # Collapse multiple spaces
+    name_str = re.sub(r'\s+', ' ', name_str)
+    return name_str
+
+def normalize_name_for_index(name):
+    """Normalize name for fuzzy matching index (more aggressive)"""
+    if not name:
+        return ""
+    name = str(name).lower()
+    name = unicodedata.normalize('NFKC', name)
+    # Remove punctuation
+    name = re.sub(r'[^a-z0-9\s]', ' ', name)
+    # Collapse spaces
+    name = ' '.join(name.split())
+    return name.strip()
+
+def detect_columns(df, sample_size=20):
+    """
+    Auto-detect email and name columns
+    Returns: (email_col_idx, name_col_idx, email_col_name, name_col_name)
+    """
+    if len(df.columns) < 2:
+        return None, None, None, None
+    
+    # Sample first N rows
+    sample = df.head(sample_size)
+    
+    # Count valid emails in each column
+    email_scores = {}
+    for idx, col in enumerate(df.columns):
+        valid_count = 0
+        for val in sample[col]:
+            val_str = str(val).strip().lower()
+            if '@' in val_str and '.' in val_str:
+                valid_count += 1
+        email_scores[idx] = valid_count
+    
+    # Find column with most emails
+    if not email_scores or max(email_scores.values()) == 0:
+        # No email column found, assume first two
+        return 0, 1, df.columns[0], df.columns[1]
+    
+    email_col_idx = max(email_scores, key=email_scores.get)
+    email_col_name = df.columns[email_col_idx]
+    
+    # Find name column (first non-email column)
+    name_col_idx = None
+    name_col_name = None
+    for idx, col in enumerate(df.columns):
+        if idx != email_col_idx:
+            name_col_idx = idx
+            name_col_name = col
+            break
+    
+    return email_col_idx, name_col_idx, email_col_name, name_col_name
+
+def load_ad_cache():
+    """Load AD cache from Stage 1"""
+    global s2_ad_cache, s2_name_index
+    
+    try:
+        cache_files = glob.glob(os.path.join(AD_CACHE_DIR, "ad_users_*.csv"))
+        if not cache_files:
+            return False, "No AD cache found. Please run Stage 1 first."
+        
+        latest_cache = max(cache_files, key=os.path.getmtime)
+        df = pd.read_csv(latest_cache)
+        
+        # Build cache
+        for _, row in df.iterrows():
+            email = normalize_email(row['email'])
+            if not email:
+                continue
+            
+            s2_ad_cache[email] = {
+                'email': email,
+                'name': row['displayName'],
+                'dept': row['department'],
+                'active': row['accountEnabled'],
+                'jobTitle': row.get('jobTitle', 'N/A'),
+                'lastSignIn': row.get('lastSignInDateTime', 'N/A')
+            }
+            
+            # Build name index
+            norm_name = normalize_name_for_index(row['displayName'])
+            if norm_name:
+                s2_name_index[norm_name] = email
+                
+                # Add reversed name
+                parts = norm_name.split()
+                if len(parts) == 2:
+                    reversed_name = f"{parts[1]} {parts[0]}"
+                    s2_name_index[reversed_name] = email
+        
+        return True, f"Loaded {len(s2_ad_cache)} users from {os.path.basename(latest_cache)}"
+        
+    except Exception as e:
+        return False, f"Error loading AD cache: {str(e)}"
+
+def fuzzy_match_name(target_name, top_n=5):
+    """Find best email matches for a name using fuzzy matching"""
+    if not FUZZY_AVAILABLE or not s2_name_index or not target_name:
+        return []
+    
+    norm_target = normalize_name_for_index(target_name)
+    if not norm_target:
+        return []
+    
+    # Exact match check
+    if norm_target in s2_name_index:
+        email = s2_name_index[norm_target]
+        user = s2_ad_cache[email]
+        return [{
+            'email': email,
+            'name': user['name'],
+            'dept': user['dept'],
+            'score': 100,
+            'active': user['active']
+        }]
+    
+    # Fuzzy search
+    try:
+        candidates = list(s2_name_index.keys())
+        matches = process.extract(
+            norm_target,
+            candidates,
+            scorer=fuzz.token_sort_ratio,
+            limit=top_n * 2
+        )
+        
+        results = []
+        seen = set()
+        
+        for match_name, score, _ in matches:
+            if score < 70:
+                continue
+            
+            email = s2_name_index[match_name]
+            if email in seen:
+                continue
+            
+            seen.add(email)
+            user = s2_ad_cache[email]
+            
+            results.append({
+                'email': email,
+                'name': user['name'],
+                'dept': user['dept'],
+                'score': int(score),
+                'active': user['active']
+            })
+            
+            if len(results) >= top_n:
+                break
+        
+        return results
+    except:
+        return []
+
+def validate_user(input_email, input_name):
+    """
+    Validate a single user
+    Returns: (validated_dict, needs_review)
+    """
+    # Normalize inputs
+    email = normalize_email(input_email)
+    name = normalize_name(input_name)
+    
+    result = {
+        'original_email': input_email,
+        'original_name': input_name,
+        'validated_email': None,
+        'validated_name': None,
+        'ad_status': None,
+        'validation_status': None,
+        'validation_notes': [],
+        'department': None,
+        'job_title': None,
+        'needs_review': False,
+        'review_options': []
+    }
+    
+    # Case 1: Both empty → Skip (Q3: Option B)
+    if not email and not name:
+        result['validation_status'] = 'BOTH_EMPTY'
+        result['validation_notes'].append('Both email and name are empty')
+        return result, False  # Don't add to review, skip it
+    
+    # Case 2: Invalid email format
+    if email and not is_valid_email_format(email):
+        result['validation_status'] = 'INVALID_FORMAT'
+        result['validation_notes'].append(f'Invalid email format: {email}')
+        result['needs_review'] = True
+        return result, True
+    
+    # Case 3: Only email provided
+    if email and not name:
+        if email in s2_ad_cache:
+            ad_user = s2_ad_cache[email]
+            result['validated_email'] = email
+            result['validated_name'] = ad_user['name']
+            result['ad_status'] = 'Active' if ad_user['active'] else 'Inactive'
+            result['department'] = ad_user['dept']
+            result['job_title'] = ad_user['jobTitle']
+            
+            if not ad_user['active']:
+                result['validation_status'] = 'INACTIVE_ACCOUNT'
+                result['validation_notes'].append('Account is inactive in AD')
+                result['needs_review'] = True
+            else:
+                result['validation_status'] = 'AUTO_FILLED_NAME'
+                result['validation_notes'].append('Name auto-filled from AD')
+            
+            return result, result['needs_review']
+        else:
+            result['validation_status'] = 'NOT_FOUND'
+            result['validation_notes'].append('Email not found in AD')
+            result['needs_review'] = True
+            return result, True
+    
+    # Case 4: Only name provided
+    if name and not email:
+        matches = fuzzy_match_name(name)
+        
+        if not matches:
+            result['validation_status'] = 'NOT_FOUND'
+            result['validated_name'] = name
+            result['validation_notes'].append('Name not found in AD')
+            result['needs_review'] = True
+            return result, True
+        
+        if len(matches) == 1:
+            # Single match - auto-fill (Q2: this is OK)
+            match = matches[0]
+            result['validated_email'] = match['email']
+            result['validated_name'] = match['name']
+            result['ad_status'] = 'Active' if match['active'] else 'Inactive'
+            result['department'] = match['dept']
+            
+            if not match['active']:
+                result['validation_status'] = 'INACTIVE_ACCOUNT'
+                result['validation_notes'].append('Account is inactive in AD')
+                result['needs_review'] = True
+            else:
+                result['validation_status'] = 'AUTO_FILLED_EMAIL'
+                result['validation_notes'].append(f"Email auto-filled from AD (match score: {match['score']})")
+            
+            return result, result['needs_review']
+        
+        # Multiple matches - need review (Q2: Option A)
+        result['validation_status'] = 'AMBIGUOUS_NAME'
+        result['validated_name'] = name
+        result['validation_notes'].append(f'Found {len(matches)} possible matches')
+        result['needs_review'] = True
+        result['review_options'] = matches
+        return result, True
+    
+    # Case 5: Both email and name provided
+    if email and name:
+        if email in s2_ad_cache:
+            ad_user = s2_ad_cache[email]
+            ad_name = normalize_name_for_index(ad_user['name'])
+            input_name_norm = normalize_name_for_index(name)
+            
+            # Check if names match
+            if ad_name == input_name_norm:
+                # Perfect match
+                result['validated_email'] = email
+                result['validated_name'] = ad_user['name']
+                result['ad_status'] = 'Active' if ad_user['active'] else 'Inactive'
+                result['department'] = ad_user['dept']
+                result['job_title'] = ad_user['jobTitle']
+                
+                if not ad_user['active']:
+                    result['validation_status'] = 'INACTIVE_ACCOUNT'
+                    result['validation_notes'].append('Account is inactive in AD')
+                    result['needs_review'] = True
+                else:
+                    result['validation_status'] = 'PERFECT_MATCH'
+                    result['validation_notes'].append('Email and name match AD perfectly')
+                
+                return result, result['needs_review']
+            else:
+                # Mismatch - prioritize email (Q4: Option A)
+                result['validated_email'] = email
+                result['validated_name'] = ad_user['name']
+                result['ad_status'] = 'Active' if ad_user['active'] else 'Inactive'
+                result['department'] = ad_user['dept']
+                result['job_title'] = ad_user['jobTitle']
+                result['validation_status'] = 'MISMATCH_EMAIL_PRIORITY'
+                result['validation_notes'].append(f"Name mismatch: Input '{name}' vs AD '{ad_user['name']}'")
+                result['validation_notes'].append('Using email as source of truth')
+                result['needs_review'] = True
+                return result, True
+        else:
+            # Email not in AD
+            result['validation_status'] = 'NOT_FOUND'
+            result['validated_name'] = name
+            result['validation_notes'].append('Email not found in AD')
+            result['needs_review'] = True
+            return result, True
+    
+    return result, False
+
+# ========== FILE UPLOAD HANDLER ==========
+
+def on_s2_upload_change(change):
+    if s2_upload.value and len(s2_upload.value) > 0:
+        fname = s2_upload.value[0]['name']
+        s2_upload_status.value = f"<b style='color:green;'>✅ Selected: {fname}</b>"
+        if s2_ad_cache:
+            s2_btn_validate.disabled = False
+
+s2_upload.observe(on_s2_upload_change, 'value')
+
+# ========== VALIDATION FUNCTION ==========
+
+def do_stage2_validate(b):
+    global s2_input_df, s2_input_filename, s2_validated_rows, s2_review_rows, s2_is_processing
+    
+    if s2_is_processing:
+        return
+    
+    s2_is_processing = True
+    b.disabled = True
+    s2_output.clear_output()
+    s2_validated_rows = []
+    s2_review_rows = []
+    
+    if not s2_upload.value:
+        with s2_output:
+            print("❌ Please upload a user list file")
+        s2_is_processing = False
+        b.disabled = False
+        return
+    
+    try:
+        with s2_output:
+            print("\n" + "="*70)
+            print("🔍 Stage 2: Ultra Email/User Validation")
+            print("="*70 + "\n")
+        
+        # Load file
+        f_item = s2_upload.value[0]
+        s2_input_filename = f_item['name']
+        
+        if s2_input_filename.endswith('.csv'):
+            s2_input_df = pd.read_csv(io.BytesIO(f_item['content']))
+        else:
+            s2_input_df = pd.read_excel(io.BytesIO(f_item['content']))
+        
+        logger_s2.info(f"Loaded input file: {s2_input_filename}, {len(s2_input_df)} rows")
+        
+        with s2_output:
+            print(f"📄 Loaded: {s2_input_filename}")
+            print(f"   Rows: {len(s2_input_df)}")
+            print(f"   Columns: {list(s2_input_df.columns)}\n")
+        
+        # Detect columns
+        email_idx, name_idx, email_col, name_col = detect_columns(s2_input_df)
+        
+        if email_idx is None or name_idx is None:
+            raise Exception("Could not detect email and name columns")
+        
+        with s2_output:
+            print(f"📋 Auto-detected columns:")
+            print(f"   Email column: '{email_col}' (column {email_idx})")
+            print(f"   Name column: '{name_col}' (column {name_idx})\n")
+        
+        logger_s2.info(f"Detected columns: Email='{email_col}', Name='{name_col}'")
+        
+        # Validate each user
+        stats = {cat: 0 for cat in CATEGORIES.keys()}
+        
+        with s2_output:
+            print("🔍 Validating users...")
+            print()
+        
+        for idx, row in s2_input_df.iterrows():
+            input_email = row[email_col]
+            input_name = row[name_col]
+            
+            validated, needs_review = validate_user(input_email, input_name)
+            
+            # Add other columns from input
+            for col in s2_input_df.columns:
+                if col not in [email_col, name_col]:
+                    validated[col] = row[col]
+            
+            if validated['validation_status'] != 'BOTH_EMPTY':
+                s2_validated_rows.append(validated)
+                stats[validated['validation_status']] += 1
+                
+                if needs_review:
+                    s2_review_rows.append(validated)
+        
+        # Display statistics
+        with s2_output:
+            print("="*70)
+            print("📊 Validation Summary")
+            print("="*70)
+            for cat, count in stats.items():
+                if count > 0:
+                    print(f"{CATEGORIES[cat]:40} {count:>5}")
+            print("="*70)
+            print(f"Total validated: {len(s2_validated_rows)}")
+            print(f"Need review: {len(s2_review_rows)}")
+            print("="*70 + "\n")
+        
+        logger_s2.info(f"Validation complete: {len(s2_validated_rows)} validated, {len(s2_review_rows)} need review")
+        
+        # Render review UI if needed
+        if s2_review_rows:
+            render_review_ui()
+        else:
+            s2_review_container.children = [
+                widgets.HTML("<h3 style='color:green;'>✅ All users validated successfully! No manual review needed.</h3>")
+            ]
+        
+        s2_btn_save.disabled = False
+        s2_status.value = f"<span style='color:green;'>✅ Validation complete: {len(s2_validated_rows)} users</span>"
+        
+    except Exception as e:
+        with s2_output:
+            print(f"\n❌ Error: {str(e)}")
+        logger_s2.error(f"Validation error: {str(e)}", exc_info=True)
+        s2_status.value = f"<span style='color:red;'>❌ Error: {str(e)}</span>"
+    finally:
+        s2_is_processing = False
+        b.disabled = False
+
+# ========== MANUAL REVIEW UI ==========
+
+def render_review_ui():
+    """Render manual review UI for rows needing review"""
+    global s2_review_rows
+    
+    if not s2_review_rows:
+        s2_review_container.children = []
+        return
+    
+    rows_ui = []
+    
+    # Header
+    header = widgets.HTML(f"""
+        <div style='background:linear-gradient(135deg,#f093fb 0%,#f5576c 100%);color:white;padding:16px;border-radius:8px;margin:16px 0;'>
+            <h3 style='margin:0 0 8px 0;'>⚠️ Manual Review Required ({len(s2_review_rows)} items)</h3>
+            <p style='margin:0;opacity:0.9;'>Review and edit the suggestions below before saving</p>
+        </div>
+    """)
+    rows_ui.append(header)
+    
+    # Review rows
+    for idx, row in enumerate(s2_review_rows):
+        row_widget = create_review_row_widget(idx, row)
+        rows_ui.append(row_widget)
+    
+    s2_review_container.children = rows_ui
+
+def create_review_row_widget(idx, row):
+    """Create widget for a single review row"""
+    
+    # Status badge
+    status = row['validation_status']
+    status_label = CATEGORIES.get(status, status)
+    
+    if status.startswith('❌'):
+        badge_color = '#dc3545'
+    elif status.startswith('⚠️'):
+        badge_color = '#ffc107'
+    else:
+        badge_color = '#28a745'
+    
+    # Build UI
+    status_html = widgets.HTML(f"""
+        <div style='background:{badge_color};color:white;padding:8px 12px;border-radius:4px;font-weight:600;margin-bottom:8px;'>
+            {status_label}
+        </div>
+        <div style='font-size:0.9em;color:#666;margin-bottom:12px;'>
+            {' • '.join(row['validation_notes'])}
+        </div>
+    """)
+    
+    # Input fields
+    input_html = widgets.HTML(f"""
+        <div style='display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:8px;background:#f8f9fa;border-radius:4px;margin-bottom:8px;'>
+            <div>
+                <b>Original Email:</b><br>
+                <code>{row['original_email']}</code>
+            </div>
+            <div>
+                <b>Original Name:</b><br>
+                <code>{row['original_name']}</code>
+            </div>
+        </div>
+    """)
+    
+    # Editable fields
+    email_input = widgets.Text(
+        value=row.get('validated_email', '') or '',
+        description='Email:',
+        layout=widgets.Layout(width='45%')
+    )
+    
+    name_input = widgets.Text(
+        value=row.get('validated_name', '') or '',
+        description='Name:',
+        layout=widgets.Layout(width='45%')
+    )
+    
+    # Handle ambiguous name case
+    if status == 'AMBIGUOUS_NAME' and row.get('review_options'):
+        options_list = []
+        for opt in row['review_options']:
+            label = f"{opt['name']} ({opt['email']}) - {opt['dept']} [Score: {opt['score']}]"
+            options_list.append((label, opt))
+        
+        dropdown = widgets.Dropdown(
+            options=[('-- Select --', None)] + options_list,
+            description='Select:',
+            layout=widgets.Layout(width='90%')
+        )
+        
+        def on_select_change(change, idx=idx, email_input=email_input, name_input=name_input):
+            if change['new']:
+                selected = change['new']
+                email_input.value = selected['email']
+                name_input.value = selected['name']
+                s2_review_rows[idx]['validated_email'] = selected['email']
+                s2_review_rows[idx]['validated_name'] = selected['name']
+        
+        dropdown.observe(on_select_change, 'value')
+        
+        fields = widgets.VBox([
+            dropdown,
+            widgets.HBox([email_input, name_input])
+        ])
+    else:
+        fields = widgets.HBox([email_input, name_input])
+    
+    # Update handlers
+    def update_email(change, idx=idx):
+        s2_review_rows[idx]['validated_email'] = change['new']
+    
+    def update_name(change, idx=idx):
+        s2_review_rows[idx]['validated_name'] = change['new']
+    
+    email_input.observe(update_email, 'value')
+    name_input.observe(update_name, 'value')
+    
+    # Action buttons
+    keep_btn = widgets.Button(description='✓ Keep', button_style='success', layout=widgets.Layout(width='100px'))
+    skip_btn = widgets.Button(description='✗ Skip', button_style='danger', layout=widgets.Layout(width='100px'))
+    
+    def on_keep(b, idx=idx):
+        # Mark as kept
+        s2_review_rows[idx]['action'] = 'keep'
+        b.description = '✓ Kept'
+        b.disabled = True
+    
+    def on_skip(b, idx=idx):
+        # Mark as skipped
+        s2_review_rows[idx]['action'] = 'skip'
+        b.description = '✗ Skipped'
+        b.disabled = True
+    
+    keep_btn.on_click(on_keep)
+    skip_btn.on_click(on_skip)
+    
+    actions = widgets.HBox([keep_btn, skip_btn])
+    
+    # Container
+    container = widgets.VBox([
+        status_html,
+        input_html,
+        fields,
+        actions
+    ], layout=widgets.Layout(
+        border='1px solid #ddd',
+        border_radius='8px',
+        padding='16px',
+        margin='8px 0'
+    ))
+    
+    return container
+
+# ========== SAVE FUNCTION ==========
+
+def do_stage2_save(b):
+    if not s2_validated_rows:
+        with s2_output:
+            print("❌ No validated data to save")
+        return
+    
+    b.disabled = True
+    
+    try:
+        # Apply review changes
+        final_rows = []
+        for row in s2_validated_rows:
+            # Check if this row is in review and was skipped
+            if row in s2_review_rows and row.get('action') == 'skip':
+                continue
+            final_rows.append(row)
+        
+        # Build DataFrame
+        df_output = pd.DataFrame(final_rows)
+        
+        # Reorder columns
+        priority_cols = [
+            'original_email', 'original_name',
+            'validated_email', 'validated_name',
+            'ad_status', 'validation_status',
+            'validation_notes', 'department', 'job_title'
+        ]
+        
+        other_cols = [c for c in df_output.columns if c not in priority_cols + ['needs_review', 'review_options', 'action']]
+        
+        final_cols = [c for c in priority_cols if c in df_output.columns] + other_cols
+        df_output = df_output[final_cols]
+        
+        # Convert validation_notes list to string
+        if 'validation_notes' in df_output.columns:
+            df_output['validation_notes'] = df_output['validation_notes'].apply(lambda x: '; '.join(x) if isinstance(x, list) else x)
+        
+        # Generate filename
+        base_name = s2_input_filename.replace('.csv', '').replace('.xlsx', '')
+        date_str = datetime.now().strftime('%Y%m%d')
+        output_filename = f"{base_name}_User_Listing_{date_str}_AD_verified.xlsx"
+        output_path = os.path.join(STAGE2_DIR, output_filename)
+        
+        # Save
+        df_output.to_excel(output_path, index=False, sheet_name='Validated Users')
+        
+        with s2_output:
+            print("\n" + "="*70)
+            print("💾 File Saved")
+            print("="*70)
+            print(f"Location: {output_path}")
+            print(f"Rows: {len(df_output)}")
+            print(f"Columns: {list(df_output.columns[:9])}...")
+            print("="*70)
+        
+        s2_status.value = f"<span style='color:blue;'>✅ Saved: {output_filename}</span>"
+        logger_s2.info(f"Saved validated file: {output_path}")
+        
+    except Exception as e:
+        with s2_output:
+            print(f"\n❌ Save error: {str(e)}")
+        logger_s2.error(f"Save error: {str(e)}", exc_info=True)
+    finally:
+        b.disabled = False
+
+# ========== BIND EVENTS ==========
+s2_btn_validate.on_click(do_stage2_validate)
+s2_btn_save.on_click(do_stage2_save)
+
+# ========== INITIALIZE ==========
+success, msg = load_ad_cache()
+if success:
+    s2_status.value = f"<span style='color:green;'>✅ {msg}</span>"
+    logger_s2.info(msg)
+else:
+    s2_status.value = f"<span style='color:orange;'>⚠️ {msg}</span>"
+    logger_s2.warning(msg)
+
+# ========== UI LAYOUT ==========
+stage2_ui = widgets.VBox([
+    widgets.HTML("""
+        <div style='
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            padding: 20px;
+            border-radius: 8px;
+            color: white;
+            margin-bottom: 20px;
+        '>
+            <h2 style='margin: 0 0 10px 0;'>🔍 Stage 2: Ultra Email/User Validation</h2>
+            <p style='margin: 0; opacity: 0.9;'>
+                ✨ Auto-detect columns • 🎯 Smart matching • ⚠️ Edge case handling • ✏️ Manual review UI
+            </p>
+        </div>
+    """),
+    widgets.HBox([s2_upload, s2_upload_status]),
+    widgets.HBox([s2_btn_validate, s2_btn_save]),
+    s2_status,
+    s2_review_container,
+    s2_output
+])
+
+clear_output()
+display(stage2_ui)
+
+logger_s2.info("Stage 2 Ultra Validation UI initialized")
+logger_s2.info("="*60)
