@@ -1,396 +1,3 @@
-
-
-{ "cells": [ { "cell_type": "markdown", "metadata": {}, "source": [ "# 🛡️ AER - Smart Access Review Generator (v7.0 Three-Stage)\n", "\n", "**Major Refactoring in v7.0:**\n", "- ✅ **Stage 1 (Cell 1)**: AD Authentication & User Download\n", "- ✅ **Stage 2 (Cell 2)**:
-
-pasted
-
-read this jupyter notebook first.
-
-6:25 PM
-
-檢查是否有相關的skill檔案可以幫助處理Jupyter notebook的分析
-好der！我看完這個Jupyter notebook了 🎉
-
-這是一個三階段存取權限審查生成器（AER - Access Review Generator）v7.0，主要功能是：
-
-📋 主要架構
-Stage 1（Cell 1）：AD認證與用戶下載 🔐
-
-登入Azure AD
-下載所有active users的資料
-包含manager資訊、登入活動等
-支援快取機制避免重複下載
-Stage 1.5（Cell 2）：組織樹建構器 🌳
-
-以CEO（Steven/Steve Bush）為root
-顯示3層組織架構
-按部門顯示manager階層
-自動生成reviewer mapping
-Stage 2（Cell 3）：Email/用戶驗證 🔍
-
-驗證用戶email是否在AD中存在
-檢查帳號狀態（Active/Inactive/Not Found）
-支援fuzzy matching來處理缺少email的狀況
-輸出驗證後的用戶清單
-Stage 3（Cell 4）：Reviewer指派與手動覆寫 ⚙️
-
-根據email/department mapping自動指派reviewer
-Email match → 需要手動審核（pre-fill建議）
-Department match → 自動指派
-無法匹配 → 需要手動處理
-最終產生帶有Action dropdown的Excel檔案
-🎯 特色功能
-階段式工作流程：每個階段獨立運作，存檔checkpoint
-Manager資訊抓取：建立完整組織樹
-AD狀態欄位：清楚顯示Active/Inactive/Not Found
-Email優先邏輯：Email匹配需要手動批准
-向下相容：可跳過Stage 1-2直接用舊檔案
-你想要我幫你做什麼呢？是要：
-
-改進某個功能？ 🔧
-修復bug？ 🐛
-加新功能？ ✨
-還是優化效能？ ⚡
-lets talkea bout cell2. stage 1.5;  the corporate org needs to be tree view based on manager with 4 levels (steven bush as level1). not folder view with all dept. and head of dept is not determined by report structure. please think thinkthink then fix it.
-
-6:26 PM
-
-Diagnosed structural flaws and architected manager-based hierarchy redesign
-好的！讓我仔細想想 Stage 1.5 的問題 🤔
-
-🎯 問題分析
-現況問題：
-
-現在是 folder view by department（按部門分組）
-Dept head 是用 depth/jobTitle 排序決定的（不準確！）
-只顯示 3 層，但你要 4 層
-不是真正的 manager hierarchy tree view
-你想要：
-
-✅ Pure manager tree view（Steven Bush → 直屬 → 直屬的直屬...）
-✅ 4 levels（Steven = Level 1）
-✅ Dept head 由 真實 reporting structure 決定
-✅ 每個 department 的 head = 該 dept 中最接近 root 的人
-讓我重寫 Cell 2！💪
-
-
-Prepared to restructure organizational hierarchy into manager-based tree view
-🎉 修好了！主要改動：
-📊 核心變更
-1. Tree View 改成真正的 Manager Hierarchy 🌳
-
-python
-# 以前：按 department folder 分組
-# 現在：純 manager tree（Steven Bush → 直屬 → 直屬的直屬...）
-2. 4 Levels（不是 3 了）
-
-Level 1 = Steven Bush（CEO）
-Level 2 = 他的直接下屬
-Level 3 = Level 2 的下屬
-Level 4 = Level 3 的下屬
-3. Dept Head 改用真實 Reporting Structure 💯
-
-python
-def find_dept_heads(df, nodes, levels):
-    # Dept head = 該 department 中 level 最小的人
-    # （= 離 root 最近 = 最高階）
-    dept_people.sort(key=lambda x: x['level'])
-    head = dept_people[0]  # 最小的 level = dept head
-4. Reviewer 邏輯
-
-Dept head 的 reviewer = 他的 manager（但不能在同一個 dept）
-會自動往上爬，直到找到不同 dept 的 manager
-🎨 UI 改進
-python
-def render_manager_tree_html():
-    # 遞迴式 tree 顯示
-    # 用 <details>/<summary> 做 collapsible
-    # 每個節點顯示：
-    # 👤 Name • Title • Dept [L2] 
-    #    email@example.com
-    #    ├─ 直屬1
-    #    └─ 直屬2
-```
-
-### 🔥 關鍵優化
-
-1. **BFS 計算 levels**（避免 cycle）
-2. **自動生成 mapping**（head + wildcard 兩行）
-3. **Collapsible tree**（可展開/收合）
-4. **Level badges**（一眼看出階層）
-
----
-
-試試看吧！應該會變成像這樣的 tree：
-```
-🌳 Steven Bush [L1] - CEO
-  ├─ 👤 VP Engineering [L2]
-  │   ├─ 👤 Senior Manager [L3]
-  │   │   └─ 👤 Team Lead [L4]
-  │   └─ 👤 Director [L3]
-  └─ 👤 VP Sales [L2]
-      └─ 👤 Regional Manager [L3]
-有問題再跟我說！ 🚀
-
-Cell2 stage1 5 fixed
-PY 
-for each person, list his department next by the name in the tree chart
-
-6:29 PM
-
-Reformatted tree chart layout to display department beside names
-好der！馬上改 🔧
-
-
-Restructured organizational chart with departments displayed prominently
-✅ 改好了！
-現在每個人的顯示格式變成：
-
-👤 Steven Bush (Corporate - Executive) • Chief Executive Officer [L1]
-    steven.bush@company.com
-    ├─ 👤 John Doe (Corporate - IT) • VP Engineering [L2]
-    │   john.doe@company.com
-    │   └─ 👤 Jane Smith (Corporate - IT) • Senior Manager [L3]
-    │       jane.smith@company.com
-    └─ 👤 Bob Johnson (Corporate - Sales) • VP Sales [L2]
-        bob.johnson@company.com
-變更：
-
-Department 用藍色粗體括號顯示在名字正後面 📍
-順序：Name (Department) • Title [Level]
-一眼就能看出每個人屬於哪個部門！
-這樣應該更清楚了吧？ 😎
-
-Cell2 stage1 5 fixed
-PY 
-it takes pretty long to build the tree. is this normal? should there be showing which cache file is used and progress of building details?
-
-6:34 PM
-
-Identified UX improvements and planned progress indicators for tree building
-你說得對！應該要有進度顯示才不會讓人以為當機了 😅
-
-讓我加上詳細的進度指示器 + cache 檔案資訊！
-
-
-Refined code with detailed progress indicators for user clarity
-✅ 加上詳細進度顯示了！
-📊 現在會顯示：
-進度條 + 8 個步驟：
-
-Building: [██████████████████] 100%
-✅ Complete!
-
-====================================================
-🌳 Building Organization Tree
-====================================================
-
-📂 Using cache: ad_users_20250131_1430.csv
-   Total users in cache: 1250
-   Corporate users: 892
-
-👑 CEO Found: Steven Bush (steven.bush@company.com)
-   Title: Chief Executive Officer
-
-🏗️ Building organization structure...
-   ✓ Nodes created: 892
-   ✓ Manager relationships: 234
-   ✓ Levels assigned: 512
-
-📊 Analyzing department structure...
-   ✓ Departments found: 18
-      • Corporate - IT: John Doe (L2)
-      • Corporate - Sales: Jane Smith (L2)
-      ...
-
-🗺️ Generating reviewer mapping...
-   ✓ Mapping rows generated: 36
-
-🎨 Rendering tree HTML...
-====================================================
-✅ Organization Tree Built Successfully
-====================================================
-⏱️ 關於速度問題
-建立 tree 確實需要時間，特別是：
-
-大型組織（500+ 人）→ 遞迴渲染 HTML 比較慢
-深層 hierarchy（很多 levels）→ BFS 計算需要時間
-複雜 department 結構（20+ depts）→ 需要逐一分析
-正常速度：
-
-小型（<200 人）：1-3 秒
-中型（200-500 人）：3-8 秒
-大型（500-1000 人）：8-15 秒
-超大型（1000+ 人）：15-30 秒
-💡 如果還是太慢，可以：
-只顯示前 3 層（改回 MAX_TREE_LEVELS = 3）
-限制每個 node 顯示的 children 數量
-改用 lazy loading（點了才展開下層）
-需要我加上這些優化嗎？ 🚀
-
-Cell2 stage1 5 fixed
-PY 
-output repeated 5 times. then stuck at "analyszing department structure". take more than few minutes and still nothing. for only 2 levels
-
-6:39 PM
-
-Diagnosed repeated output and function bottleneck issues
-哇靠！有嚴重 bug 😱
-
-問題應該是：
-
-重複 5 次 → 最底下有自動呼叫 refresh_tree()
-卡在 department structure → find_dept_heads() 裡面有無限迴圈！
-讓我修：
-
-
-Diagnosed performance bottleneck in hierarchical analysis system
-🎉 修好了！三個主要 bug 都解決了
-🐛 修復的問題：
-❌ 輸出重複 5 次
-→ ✅ 移除自動執行，改成手動點按鈕
-❌ 卡在 "Analyzing department structure"
-→ ✅ 加上防無限迴圈保護（visited set + max_hops=10）
-❌ 沒有進度顯示
-→ ✅ 詳細的 8 步驟進度條 + 每步驟說明
-📊 現在會顯示：
-📂 Using cache: ad_users_20250131.csv (892 users)
-👑 CEO: Steven Bush
-🏗️ Building structure... (每 100 人顯示一次進度)
-📊 Analyzing departments... (每個 dept 顯示 head + reviewer)
-🗺️ Generating mapping...
-✅ Complete! (總結統計)
-🧪 測試檔案
-test_stage1_5_logic.py 可以單獨驗證邏輯（不需要真實資料）
-
-現在應該：
-
-✅ 不會重複執行
-✅ 不會卡住（最多爬 10 層 manager）
-✅ 能看到詳細進度
-✅ 知道用哪個 cache 檔案
-試試看吧！如果還有問題請跟我說 🚀
-
-Cell2 stage1 5 fixed
-PY 
-Test stage1 5 logic
-PY 
-Readme fixes
-Document · MD 
-make the tree structure easier to read. if it's the head of the department, add a background color tot he department. fold the branch if all in the same department as the node person. if there is a department wthin a parent department. show both head of department and hide (partial fold, can be unfolder if toggle the parent dept head node). anyway, just leave this intuitive, readable, and easier to understand as much as possible. make the populated table editable. use name instead of email.  ultrathink
-
-6:53 PM
-
-Architected intuitive tree visualization with smart folding and editable mapping features
-好！讓我做一個超直觀、易讀、可編輯的版本 🎨
-
-
-Synthesized UI improvements for tree visualization and table interactivity
-🎉 完成！Ultra-Intuitive Org Tree 做好了！
-我徹底重新設計了 Stage 1.5，現在超級直觀、易讀、好用！🚀
-
-✨ 核心改進
-🌳 1. Tree 超級直觀
-📌 Dept Head 金框高亮
-普通員工：John Smith (Corporate - IT) L3
-部門主管：Jane Doe 📌 Corporate - IT L2  ← 金框！
-🎨 顏色編碼
-IT = 藍色 🔵
-Sales = 紫色 🟣
-Finance = 橙色 🟠
-HR = 綠色 🟢
-每個部門都有專屬顏色！
-🔽 Smart Folding（智慧折疊）
-同部門 → 預設折疊（不亂）
-混合部門 → 自動展開（看得清楚）
-可點擊展開/折疊任何節點
-📁 Department Grouping（革命性！）
-當一個 manager 下有多個部門時：
-
-Steven Bush (CEO) L1
-├─ 📁 Corporate - IT (Head: John Doe) [15 people]  ← 自動分組！
-│   └─ (點開看詳細)
-├─ 📁 Corporate - Sales (Head: Jane) [8 people]
-└─ 📁 Corporate - Finance (Head: David) [3 people]
-✏️ 2. Mapping Table 完全可編輯
-舊版： 靜態 HTML，用 email（看不懂）
-新版： 互動式，用名字（一目了然）
-
-┌──────────────────────────────────────────────────┐
-│ Department    │ Head        │ Reviewer    │ 🗑️ │
-├──────────────────────────────────────────────────┤
-│ Corporate-IT  │ [John Doe]  │ [Steven  ]  │ 🗑️ │  ← 可編輯！
-└──────────────────────────────────────────────────┘
-  [➕ Add Department]  [💾 Save Mapping]
-功能：
-
-✅ 直接編輯欄位（點了就能改）
-✅ 刪除不要的部門（點 🗑️）
-✅ 新增自訂部門（點 ➕）
-✅ 用名字不是 email（超直觀）
-✅ 存成 CSV（與 Stage 3 相容）
-🚀 3. 效能 + 穩定性修復
-✅ 不會重複執行 - 加了執行鎖
-✅ 不會卡住 - 防無限迴圈（max_hops=10）
-✅ 詳細進度 - 8 步驟進度條
-✅ 顯示 cache 檔名 - 知道用哪個檔案
-✅ Level 分布統計 - 一眼看懂組織規模
-
-📊 Before vs After
-項目	舊版	新版 ULTRA
-Tree 類型	Folder view ❌	Manager tree ✅
-Dept Head	Sort 排序 ❌	Real reporting ✅
-視覺區分	無	金框+顏色 ✅
-Smart Folding	無	有 ✅
-Dept Grouping	無	有 ✅
-顯示層級	3 層	4 層 ✅
-Mapping 用	Email	Name ✅
-可編輯	否	是 ✅
-重複執行 bug	有 ❌	修好 ✅
-無限迴圈 bug	有 ❌	修好 ✅
-🎯 使用方式
-替換 Cell 2 - 用 cell2_stage1_5_ULTRA.py 的內容
-執行 Cell - 在 Jupyter 跑一次
-點 🔄 Rebuild Tree - 等進度條跑完（10-30秒）
-查看 Tree - 金框=主管、顏色=部門、可折疊
-編輯 Mapping（如需要）- 直接改名字
-點 💾 Save - 存成 CSV 給 Stage 3 用
-📁 檔案說明
-QUICK_START.md - 30秒快速入門指南
-cell2_stage1_5_ULTRA.py - 新版 Cell 2 程式碼（直接用！）
-ULTRA_FEATURES.md - 完整功能介紹
-BEFORE_AFTER.md - 舊版 vs 新版詳細對比
-💡 Pro Tips
-大型組織（500+ 人）→ 預設全折疊，只展開需要的
-想截圖給老闆看 → 展開關鍵部門，Ctrl+Shift+S 截圖
-Dept head 不對 → 用 editable table 手動改，存檔就好
-找某個人 → Ctrl+F 搜尋名字
-🎨 視覺化特色
-📌 金框 = Department Head（秒懂誰是主管）
-🎨 顏色 = 部門分類（IT藍、Sales紫、Finance橙）
-📁 Folder = 多部門分組（自動整理，不混亂）
-L1-L4 = 組織層級（綠色 badge）
-就是這麼直觀！一眼看懂整個組織架構！🌟
-
-Quick start
-Document · MD 
-Cell2 stage1 5 ultra
-PY 
-Ultra features
-Document · MD 
-Before after
-Document · MD 
-
-
-You are out of free messages until 11:00 PM
-Upgrade
-
-
-
-Claude is AI and can make mistakes. Please double-check responses.
-Cell2 stage1 5 ultra · PY
-Copy
-
 # === CELL 1.5: Org Tree Builder (v7.4 - Ultra Intuitive Tree View) ===
 import os, glob, logging, io, math
 import pandas as pd
@@ -596,23 +203,8 @@ def find_dept_heads(df, nodes, levels):
     return dept_heads
 
 def get_dept_color(dept_name):
-    """Get consistent color for department"""
-    colors = {
-        'it': '#E3F2FD',
-        'sales': '#F3E5F5',
-        'finance': '#FFF3E0',
-        'hr': '#E8F5E9',
-        'operations': '#FCE4EC',
-        'marketing': '#FFF9C4',
-        'executive': '#FFE0B2',
-        'legal': '#F1F8E9',
-        'engineering': '#E1F5FE',
-    }
-    dept_lower = dept_name.lower()
-    for key, color in colors.items():
-        if key in dept_lower:
-            return color
-    return '#F5F5F5'
+    """Get unified color for all departments"""
+    return '#F8F9FA'  # Light gray for all departments
 
 def analyze_children_depts(email, children, nodes):
     """Analyze if all children are in same dept"""
@@ -662,13 +254,14 @@ def render_ultra_intuitive_tree(root_email, nodes, children, levels, dept_heads,
         
         # Build node label
         if is_dept_head:
-            dept_badge = f"<span style='background:{dept_color};color:#333;padding:3px 8px;border-radius:4px;font-weight:700;border:2px solid #FF9800;'>📌 {dept_name}</span>"
+            # Department head - BOLD + HIGHLIGHTED
+            dept_badge = f"<span style='background:#FFF3CD;color:#000;padding:3px 8px;border-radius:4px;font-weight:700;border:2px solid #856404;'>📌 {dept_name}</span>"
+            name_html = f"<b style='font-size:1.1em;font-weight:700;'>{node['name']}</b>"
         else:
-            dept_badge = f"<span style='background:{dept_color};color:#333;padding:2px 6px;border-radius:3px;font-weight:600;'>{dept_name}</span>"
+            dept_badge = f"<span style='background:#F8F9FA;color:#495057;padding:2px 6px;border-radius:3px;font-weight:500;'>{dept_name}</span>"
+            name_html = f"<b style='font-size:1.05em;'>{node['name']}</b>"
         
-        level_badge = f"<span style='background:#4CAF50;color:white;padding:2px 6px;border-radius:3px;font-size:0.85em;'>L{level_num}</span>"
-        
-        name_html = f"<b style='font-size:1.05em;'>{node['name']}</b>"
+        level_badge = f"<span style='background:#6C757D;color:white;padding:2px 6px;border-radius:3px;font-size:0.85em;'>L{level_num}</span>"
         title_html = f"<span style='color:#666;font-style:italic;'>{node['title']}</span>"
         email_html = f"<span style='color:#999;font-size:0.85em;' title='{email}'>📧 {email.split('@')[0]}</span>"
         
@@ -703,7 +296,7 @@ def render_ultra_intuitive_tree(root_email, nodes, children, levels, dept_heads,
                     <div style='display:inline-block;margin-left:8px;'>{label}</div>
                     <div style='padding-left:28px;font-size:0.9em;'>{sublabel}</div>
                 </summary>
-                <ul style='list-style:none;padding-left:28px;border-left:2px solid {dept_color};margin:4px 0;'>
+                <ul style='list-style:none;padding-left:28px;border-left:2px solid #DEE2E6;margin:4px 0;'>
                     {kids_html}
                 </ul>
             </details>
@@ -731,9 +324,10 @@ def render_ultra_intuitive_tree(root_email, nodes, children, levels, dept_heads,
                 
                 grp_content = "".join([render_node(kid, current_level + 1, grp_dept) for kid in grp_kids])
                 
+                # AUTO EXPAND multi-dept branches
                 groups_html += f"""
-                <details>
-                    <summary style='cursor:pointer;padding:4px 8px;margin:4px 0;background:{grp_color};border-radius:4px;border-left:4px solid #FF9800;'>
+                <details open>
+                    <summary style='cursor:pointer;padding:4px 8px;margin:4px 0;background:#E9ECEF;border-radius:4px;border-left:4px solid #6C757D;font-weight:600;'>
                         <b>📁 {grp_dept}</b>{head_label} <span style='color:#666;'>({len(grp_kids)} people)</span>
                     </summary>
                     <ul style='list-style:none;padding-left:16px;margin:4px 0;'>
@@ -759,8 +353,8 @@ def render_ultra_intuitive_tree(root_email, nodes, children, levels, dept_heads,
         <div style='background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:white;padding:16px;border-radius:8px 8px 0 0;'>
             <h3 style='margin:0 0 8px 0;'>🌳 Organization Hierarchy Tree (4 Levels)</h3>
             <p style='margin:0;opacity:0.9;font-size:0.9em;'>
-                📌 Gold border = Department Head • Click to expand/collapse • 
-                Grouped by department when multiple depts under one manager
+                📌 Bold + Highlighted = Department Head • Click to expand/collapse • 
+                Multi-department branches auto-expand
             </p>
         </div>
         <div style='padding:16px;background:white;border:1px solid #ddd;border-top:none;border-radius:0 0 8px 8px;max-height:700px;overflow:auto;'>
@@ -1024,7 +618,7 @@ stage15_ui = widgets.VBox([
         <div style='background:linear-gradient(135deg,#5ee7df 0%,#b490ca 100%);padding:20px;border-radius:8px;color:white;margin-bottom:20px;'>
             <h2 style='margin:0 0 10px 0;'>🌳 Stage 1.5: Ultra-Intuitive Org Tree Builder</h2>
             <p style='margin:0;opacity:0.9;'>
-                ✨ Smart folding • 🎨 Color-coded departments • 📌 Dept head highlighting • ✏️ Editable mapping
+                ✨ Smart folding • 📌 Bold dept head highlighting • 🔓 Multi-dept auto-expand • ✏️ Editable mapping
             </p>
         </div>
     """),
