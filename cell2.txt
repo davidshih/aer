@@ -1,0 +1,57 @@
+# Process each user
+        validated_users = []
+        missing_email_indices = []
+        
+        for idx, row in df_input.iterrows():
+            user_email = row[col_email]
+            user_name = str(row[col_name]).strip()
+            
+            # --- MODIFIED LOGIC START ---
+            # If email is missing, try to find it via Fuzzy Matching using the Name
+            if is_email_missing(user_email):
+                if FUZZY_AVAILABLE and user_name:
+                    matches = fuzzy_match_name(user_name)
+                    if matches:
+                        user_email = matches[0]['email'] # Take the best match
+                        logger_s2.info(f"Fuzzy matched {user_name} to {user_email}")
+                    else:
+                        missing_email_indices.append(idx)
+                        continue
+                else:
+                    missing_email_indices.append(idx)
+                    continue
+            # --- MODIFIED LOGIC END ---
+            
+            # Standardize email
+            user_email = str(user_email).strip().lower()
+            
+            # Look up in AD cache
+            if user_email in stage2_ad_cache:
+                ad_user = stage2_ad_cache[user_email]
+                validated_user = {
+                    'Email': user_email,
+                    'User Name': ad_user['name'],
+                    'AD Status': 'Active' if ad_user['active'] else 'Inactive',
+                    'Department': ad_user['dept']
+                }
+            else:
+                validated_user = {
+                    'Email': user_email,
+                    'User Name': user_name,
+                    'AD Status': 'Not Found',
+                    'Department': 'N/A'
+                }
+            
+            # Add original columns
+            for col in df_input.columns:
+                if col not in [col_email, col_name]:
+                    validated_user[col] = row[col]
+            
+            validated_users.append(validated_user)
+
+        # CRITICAL: Prevent crash if still empty
+        if not validated_users:
+            raise Exception("No users could be validated. All emails are missing and no name matches were found in the AD Cache.")
+
+        # Create validated DataFrame
+        stage2_validated_df = pd.DataFrame(validated_users)

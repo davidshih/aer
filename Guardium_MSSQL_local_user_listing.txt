@@ -1,0 +1,34 @@
+SELECT COUNT(*)
+FROM sys.server_principals sp
+WHERE
+(
+  sp.type = 'S'
+  AND (sp.sid = 0x01 OR sp.name NOT LIKE '##MS_%##')
+)
+OR
+(
+  sp.type IN ('U','G')
+  AND sp.name LIKE CAST(SERVERPROPERTY('MachineName') AS nvarchar(128)) + '\%'
+);
+
+
+
+
+
+
+SELECT CONCAT(
+  sp.name, ' | ', sp.type_desc, ' | ',
+  CASE WHEN sp.is_disabled = 1 THEN 'Disabled' ELSE 'Enabled' END
+)
+FROM sys.server_principals sp
+WHERE
+(
+  sp.type = 'S'
+  AND (sp.sid = 0x01 OR sp.name NOT LIKE '##MS_%##')
+)
+OR
+(
+  sp.type IN ('U','G')
+  AND sp.name LIKE CAST(SERVERPROPERTY('MachineName') AS nvarchar(128)) + '\%'
+)
+ORDER BY sp.type_desc, sp.name;

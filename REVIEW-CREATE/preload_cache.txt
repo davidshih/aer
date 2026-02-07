@@ -1,0 +1,113 @@
+def preload_ad_cache(progress_widget=None, status_widget=None):
+    """Preload all active AD users into cache (v6.5) - Fixed for API Limits & Null Emails"""
+    global ad_full_cache, name_to_email_index, ad_cache_loaded
+    
+    if not headers:
+        if status_widget:
+            status_widget.value = "<span style='color:orange;'>⚠️ No authentication - skipping AD cache</span>"
+        logger.warning("Skipping AD cache preload (no auth)")
+        return False
+    
+    try:
+        if status_widget:
+            status_widget.value = "<span style='color:blue;'>🔄 Loading active users from AD...</span>"
+        
+        logger.info("Starting AD cache preload...")
+        
+        # FIXED: Initial URL and Params (Max $top is 999)
+        url = "https://graph.microsoft.com/v1.0/users"
+        params = {
+            "$filter": "accountEnabled eq true",
+            "$select": "mail,displayName,department,accountEnabled",
+            "$top": 999  # Changed from 1600 to 999 (API Limit)
+        }
+        
+        all_users = []
+        target_count = 1600
+        
+        # Pagination Loop
+        while url and len(all_users) < target_count:
+            # Only send params on the very first call; nextLink contains its own params
+            req_params = params if url == "https://graph.microsoft.com/v1.0/users" else None
+            
+            response = session.get(url, headers=headers, params=req_params, timeout=30)
+            
+            if response.status_code != 200:
+                error_msg = f"API Error: {response.status_code} - {response.text}"
+                if status_widget:
+                    status_widget.value = f"<span style='color:red;'>❌ {error_msg}</span>"
+                logger.error(error_msg)
+                return False
+            
+            data = response.json()
+            batch = data.get('value', [])
+            all_users.extend(batch)
+            
+            # Check for next page link
+            url = data.get('@odata.nextLink', None)
+            
+            # Update progress visually during pagination
+            if progress_widget:
+                progress_widget.value = len(all_users)
+                
+            # Break if we have enough users or no more pages
+            if len(all_users) >= target_count:
+                break
+        
+        # Trim to exact target if we went over
+        users = all_users[:target_count]
+        
+        if progress_widget:
+            progress_widget.max = len(users)
+        
+        # Build cache
+        valid_users = 0
+        for i, user in enumerate(users):
+            if progress_widget:
+                progress_widget.value = i + 1
+            
+            # FIXED: Handle NoneType explicitly (API returns null for some users)
+            raw_email = user.get('mail')
+            if not raw_email:
+                continue
+                
+            email = str(raw_email).lower().strip()
+            
+            display_name = user.get('displayName', 'N/A')
+            
+            # Store in primary cache
+            ad_full_cache[email] = {
+                'email': email,
+                'name': display_name,
+                'dept': user.get('department') or 'N/A',
+                'active': True
+            }
+            
+            # Build name index
+            norm_name = normalize_name(display_name)
+            if norm_name:
+                name_to_email_index[norm_name] = email
+                
+                # Also add reversed name (for "Last First" vs "First Last")
+                parts = norm_name.split()
+                if len(parts) == 2:
+                    reversed_name = f"{parts[1]} {parts[0]}"
+                    if reversed_name != norm_name:
+                        name_to_email_index[reversed_name] = email
+            
+            valid_users += 1
+        
+        ad_cache_loaded = True
+        
+        if status_widget:
+            status_widget.value = f"<span style='color:green;'>✅ Loaded {valid_users} active users from AD</span>"
+        
+        logger.info(f"AD cache preload complete: {valid_users} users, {len(name_to_email_index)} name mappings")
+        return True
+        
+    except Exception as e:
+        error_msg = f"Cache preload error: {str(e)}"
+        if status_widget:
+            status_widget.value = f"<span style='color:red;'>❌ {error_msg}</span>"
+        logger.error(error_msg, exc_info=True)
+        return False

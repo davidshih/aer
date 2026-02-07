@@ -1,0 +1,92 @@
+# === Cell 1: Setup & Engine (v5.7 Logic Restoration) ===
+import os, sys, logging, glob, io, re, requests, json
+import pandas as pd
+import ipywidgets as widgets
+from datetime import datetime
+from dotenv import load_dotenv
+from msal import PublicClientApplication
+from concurrent.futures import ThreadPoolExecutor
+from openpyxl import load_workbook
+from openpyxl.worksheet.datavalidation import DataValidation
+from openpyxl.utils import get_column_letter
+from IPython.display import display, HTML, clear_output
+
+# 1. Paths & Logging
+today_str = datetime.now().strftime('%Y-%m-%d')
+BASE_DIR = os.path.join("output", today_str, "create")
+LOG_DIR = os.path.join(BASE_DIR, "logs")
+MAPPING_DIR = os.path.join("input", "mapping")
+os.makedirs(LOG_DIR, exist_ok=True)
+
+log_file = os.path.join(LOG_DIR, f"aer_create_{today_str}_{datetime.now().strftime('%H%M')}.log")
+logger = logging.getLogger("aer")
+logger.handlers.clear()
+logger.setLevel(logging.INFO)
+formatter = logging.Formatter('%(asctime)s | %(levelname)s | %(message)s')
+fh = logging.FileHandler(log_file, encoding="utf-8")
+fh.setFormatter(formatter)
+logger.addHandler(fh)
+logger.addHandler(logging.StreamHandler(sys.stdout))
+
+# 2. Auth & Cache
+load_dotenv()
+headers = {}
+try:
+    tid, cid = os.getenv("AZURE_TENANT_ID"), os.getenv("AZURE_CLIENT_ID")
+    if tid and cid:
+        app = PublicClientApplication(cid, authority=f"https://login.microsoftonline.com/{tid}")
+        # STRICT v5.7 Scope: Only User.Read.All
+        res = app.acquire_token_interactive(scopes=["User.Read.All"], prompt="select_account")
+        if "access_token" in res:
+            headers = {"Authorization": f"Bearer {res['access_token']}"}
+            logger.info("Authentication Successful")
+except Exception as e:
+    logger.error(f"Auth Critical Error: {str(e)}")
+
+ad_cache = {}
+session = requests.Session()
+# Boost connection pool for speed
+adapter = requests.adapters.HTTPAdapter(pool_connections=50, pool_maxsize=50)
+session.mount('https://', adapter)
+
+def fetch_ad(email):
+    """ 
+    Exact v5.7 Logic:
+    - No ID check
+    - No Last Login check (prevents 403 Forbidden)
+    - Just Name, Dept, Status
+    """
+    email = str(email).strip().lower()
+    
+    # 1. Validation
+    if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email):
+        return {"email": email, "status": "Invalid", "name": "N/A", "dept": "N/A", "active": "N/A"}
+    
+    # 2. Cache
+    if email in ad_cache: return ad_cache[email]
+    
+    # 3. Mock Mode (No Auth)
+    if not headers: 
+        return {"email": email, "status": "Mock", "name": "User", "dept": "Mock Dept", "active": True}
+    
+    try:
+        # STRICT v5.7 URL: No 'signInActivity', No 'id'
+        url = f"https://graph.microsoft.com/v1.0/users/{email}?$select=displayName,department,accountEnabled"
+        r = session.get(url, headers=headers, timeout=5)
+        
+        if r.status_code == 200:
+            d = r.json()
+            res = {
+                "email": email, 
+                "status": "Found", 
+                "name": d.get("displayName", "N/A"), 
+                "dept": d.get("department") or "N/A", 
+                "active": d.get("accountEnabled", "N/A") # This returns Boolean True/False
+            }
+        else:
+            res = {"email": email, "status": "Not Found", "name": "N/A", "dept": "N/A", "active": "N/A"}
+    except:
+        res = {"email": email, "status": "Error", "name": "N/A", "dept": "N/A", "active": "N/A"}
+        
+    ad_cache[email] = res
+    return res

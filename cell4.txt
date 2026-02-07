@@ -1,0 +1,237 @@
+# === AER - Advanced Enrichment & Reviewer Assignment Logic ===
+import pandas as pd
+import numpy as np
+import requests
+import re
+import io
+import ipywidgets as widgets
+from IPython.display import display, clear_output
+from openpyxl import load_workbook
+from openpyxl.worksheet.datavalidation import DataValidation
+from openpyxl.utils import get_column_letter
+
+# --- 1. Helper Functions (工具人函式) ---
+
+def is_valid_email(s):
+    """簡單的正則表達式判斷是否為 Email"""
+    if not isinstance(s, str): return False
+    regex = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    return re.match(regex, s.strip()) is not None
+
+def detect_columns(df):
+    """
+    不看標題，盲測前兩欄，判斷哪一欄是 Email，哪一欄是 Name。
+    回傳: (email_col_name, name_col_name)
+    """
+    # 取前 10 筆資料來測試
+    sample = df.head(10)
+    col0 = df.columns[0]
+    col1 = df.columns[1]
+    
+    # 計算符合 Email 格式的數量
+    col0_score = sum(1 for x in sample[col0] if is_valid_email(str(x)))
+    col1_score = sum(1 for x in sample[col1] if is_valid_email(str(x)))
+    
+    if col0_score > col1_score:
+        return col0, col1  # 第一欄是 Email，第二欄是 Name
+    else:
+        return col1, col0  # 第二欄是 Email，第一欄是 Name
+
+def normalize_name(name):
+    """將名字轉小寫並移除標點符號，用於模糊比對"""
+    if not isinstance(name, str): return ""
+    return re.sub(r'[^a-zA-Z0-9]', '', name.lower())
+
+def check_name_match(input_name, ad_name):
+    """比對輸入名字與 AD 名字是否大概相符 (防呆檢查)"""
+    n1 = normalize_name(str(input_name))
+    n2 = normalize_name(str(ad_name))
+    # 如果其中一方包含另一方，視為 Match (例如 John Doe vs Doe, John)
+    return (n1 in n2) or (n2 in n1)
+
+# 快取 AD 查詢結果，避免重複打 API
+ad_cache = {}
+
+def fetch_ad_profile(email):
+    """去 Azure AD 查詳細資料"""
+    email = str(email).strip()
+    if not email or not is_valid_email(email): 
+        return {"status": "Invalid Email", "name": "N/A", "dept": "N/A", "active": False}
+    
+    if email in ad_cache: return ad_cache[email]
+    
+    # 呼叫 Graph API (假設 headers 已在前面的 Cell 設定好)
+    url = f"https://graph.microsoft.com/v1.0/users/{email}?$select=id,displayName,department,accountEnabled,mail"
+    try:
+        resp = requests.get(url, headers=headers) # headers 來自全域變數
+        if resp.status_code == 200:
+            data = resp.json()
+            res = {
+                "status": "Found",
+                "name": data.get("displayName", "Unknown"),
+                "dept": data.get("department") or "N/A",
+                "active": data.get("accountEnabled", False)
+            }
+        else:
+            res = {"status": "Not Found", "name": "N/A", "dept": "N/A", "active": False}
+    except Exception as e:
+        res = {"status": "Error", "name": "Error", "dept": "Error", "active": False}
+    
+    ad_cache[email] = res
+    return res
+
+# --- 2. Main Logic UI (主程式) ---
+
+w_upload_list = widgets.FileUpload(accept='.xlsx, .csv', description="1. User List")
+w_upload_map = widgets.FileUpload(accept='.csv', description="2. Reviewer Map")
+btn_run = widgets.Button(description="🚀 Process & Generate", button_style='danger')
+out_log = widgets.Output()
+
+def process_data(b):
+    out_log.clear_output()
+    if not w_upload_list.value or not w_upload_map.value:
+        with out_log: print("❌ 請先上傳兩個檔案 (User List 和 Reviewer Mapping CSV)！")
+        return
+
+    b.disabled = True
+    b.description = "Processing..."
+    
+    try:
+        # --- A. 讀取 Reviewer Mapping File ---
+        map_file = w_upload_map.value[0]
+        df_map = pd.read_csv(io.BytesIO(map_file['content']))
+        
+        # 建立快速查找字典 (轉小寫以防大小寫差異)
+        # 假設 CSV 標題固定為: "email address", "department", "reviewer"
+        # 清理欄位名稱 (移除多餘空白)
+        df_map.columns = [c.strip().lower() for c in df_map.columns]
+        
+        # 建立兩個 Lookup Table
+        # 1. Email 直接對應
+        email_map = dict(zip(df_map['email address'].str.lower().str.strip(), df_map['reviewer']))
+        # 2. 部門對應
+        dept_map = dict(zip(df_map['department'].str.lower().str.strip(), df_map['reviewer']))
+        
+        with out_log: print(f"✅ Mapping Loaded: {len(email_map)} User Rules, {len(dept_map)} Dept Rules.")
+
+        # --- B. 讀取 User List & 判斷欄位 ---
+        list_file = w_upload_list.value[0]
+        fname = list_file['name']
+        if fname.endswith('.csv'): df_user = pd.read_csv(io.BytesIO(list_file['content']))
+        else: df_user = pd.read_excel(io.BytesIO(list_file['content']))
+        
+        # 智慧判斷欄位 (不看標題，看內容)
+        col_email, col_name = detect_columns(df_user)
+        with out_log: print(f"🔍 Detected Columns - Email: '{col_email}', Name: '{col_name}'")
+
+        # --- C. 資料處理迴圈 ---
+        processed_rows = []
+        prog = widgets.IntProgress(min=0, max=len(df_user), description='Enriching:')
+        display(prog)
+        
+        for idx, row in df_user.iterrows():
+            raw_email = str(row[col_email]).strip()
+            raw_name = str(row[col_name]).strip()
+            
+            # 1. 查詢 AD
+            ad_info = fetch_ad_profile(raw_email)
+            
+            # 2. 判斷 Active
+            is_active_str = "Active" if ad_info['active'] else "Inactive"
+            if ad_info['status'] == "Not Found": is_active_str = "User Not Found"
+            
+            # 3. 判斷 Name Match
+            is_match = check_name_match(raw_name, ad_info['name'])
+            match_str = "Yes" if is_match else "Typo/Mismatch"
+            if ad_info['status'] != "Found": match_str = "N/A"
+            
+            # 4. 指派 Reviewer (核心邏輯)
+            assigned_reviewer = ""
+            # 優先權 1: 檢查 Email Mapping
+            if raw_email.lower() in email_map:
+                assigned_reviewer = email_map[raw_email.lower()]
+            # 優先權 2: 檢查 部門 Mapping (使用 AD 抓回來的部門)
+            elif ad_info['dept'].lower().strip() in dept_map:
+                assigned_reviewer = dept_map[ad_info['dept'].lower().strip()]
+            # 優先權 3: 空值
+            else:
+                assigned_reviewer = "" # No Match Found
+
+            # 5. 組合新資料
+            # 複製原始資料
+            new_row = row.to_dict()
+            # 加上新欄位
+            new_row.update({
+                "user_name": ad_info['name'],
+                "user_email": raw_email, # 確保有一欄標準的 key
+                "is_match": match_str,
+                "is_active": is_active_str,
+                "department": ad_info['dept'],
+                "Reviewer": assigned_reviewer,
+                "Reviewer's Response": "",      # 留白給下拉選單
+                "Details of Access Change": ""  # 留白
+            })
+            processed_rows.append(new_row)
+            prog.value += 1
+            
+        # --- D. 產出 Excel & 增加下拉選單 ---
+        df_final = pd.DataFrame(processed_rows)
+        
+        # 定義最後輸出的欄位順序 (原始欄位 + 新增欄位)
+        # 排除 user_email 重複顯示 (如果原始欄位已經有了)，這裡強制放在後面方便看
+        final_cols = list(df_user.columns) + [
+            "user_name", "is_match", "is_active", "department", 
+            "Reviewer", "Reviewer's Response", "Details of Access Change"
+        ]
+        # 去除重複欄位 (如果 user_email 名字衝突)
+        final_cols = list(dict.fromkeys(final_cols))
+        
+        df_export = df_final[final_cols]
+        output_path = "output/Enhanced_Review_List.xlsx"
+        df_export.to_excel(output_path, index=False)
+        
+        # 使用 OpenPyXL 加上下拉選單
+        wb = load_workbook(output_path)
+        ws = wb.active
+        
+        # 找到 "Reviewer's Response" 是第幾欄 (1-based index)
+        target_col_idx = None
+        for col_idx, cell in enumerate(ws[1], 1):
+            if cell.value == "Reviewer's Response":
+                target_col_idx = col_idx
+                break
+        
+        if target_col_idx:
+            # 建立資料驗證物件 (Dropdown)
+            dv = DataValidation(type="list", formula1='"Approved,Denied,Change Required"', allow_blank=True)
+            dv.error = 'Your entry is not in the list'
+            dv.errorTitle = 'Invalid Entry'
+            dv.prompt = 'Please select your responses from the drop-down menu'
+            dv.promptTitle = 'Action Required'
+            
+            # 套用到該欄位的所有資料列 (從第2列到最後)
+            col_letter = get_column_letter(target_col_idx)
+            dv.add(f'{col_letter}2:{col_letter}{len(df_export)+1}')
+            ws.add_data_validation(dv)
+            
+            wb.save(output_path)
+        
+        with out_log:
+            print("\n🎉 Success! Process Completed.")
+            print(f"📂 Output File: {output_path}")
+            display(df_export.head())
+
+    except Exception as e:
+        with out_log: print(f"❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    b.disabled = False
+    b.description = "🚀 Process & Generate"
+
+btn_run.on_click(process_data)
+display(widgets.VBox([
+    widgets.HTML("<h3>🕵️‍♂️ AER - Smart Review List Generator</h3>"),
+    widgets.HTML("<p>邏輯：自動偵測 Email/Name -> 查 AD 狀態 -> 比對名字 -> 依照 <b>User > Dept</b> 順序指派 Reviewer。</p>"),
+    w_upload_list, w_upload_map, btn_run, out_log
+]))
