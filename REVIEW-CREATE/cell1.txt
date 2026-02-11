@@ -1,0 +1,468 @@
+# === CELL 1: AD Authentication & User Download (v7.1 Stage 1) ===
+import os, sys, logging, re, requests, json, glob
+import pandas as pd
+import ipywidgets as widgets
+from datetime import datetime, timedelta
+from dotenv import load_dotenv
+from msal import PublicClientApplication
+from IPython.display import display, HTML, clear_output
+
+# 1. Setup Paths
+today_str = datetime.now().strftime('%Y-%m-%d')
+BASE_DIR = os.path.join("output", today_str)
+AD_CACHE_DIR = os.path.join(BASE_DIR, "ad_cache")
+LOG_DIR = os.path.join(BASE_DIR, "logs")
+USERS_URL = "https://graph.microsoft.com/v1.0/users"
+os.makedirs(AD_CACHE_DIR, exist_ok=True)
+os.makedirs(LOG_DIR, exist_ok=True)
+
+# 2. Logging
+log_file = os.path.join(LOG_DIR, f"aer_stage1_{datetime.now().strftime('%Y%m%d_%H%M')}.log")
+logger_s1 = logging.getLogger("aer_stage1")
+logger_s1.handlers.clear()
+logger_s1.setLevel(logging.INFO)
+formatter = logging.Formatter('%(asctime)s | %(levelname)s | %(message)s')
+fh = logging.FileHandler(log_file, encoding="utf-8")
+fh.setFormatter(formatter)
+logger_s1.addHandler(fh)
+logger_s1.addHandler(logging.StreamHandler(sys.stdout))
+
+# 3. Global State
+stage1_headers = {}
+stage1_ad_data = None
+stage1_file_path = None
+
+# 4. UI Components
+s1_btn_login = widgets.Button(
+    description="🔐 Login to Azure AD",
+    button_style='primary',
+    layout=widgets.Layout(width='200px', height='40px')
+)
+s1_btn_download = widgets.Button(
+    description="📥 Download AD Users",
+    button_style='success',
+    layout=widgets.Layout(width='200px', height='40px'),
+    disabled=True
+)
+s1_btn_refresh = widgets.Button(
+    description="🔄 Refresh",
+    button_style='warning',
+    layout=widgets.Layout(width='120px', height='40px'),
+    disabled=True
+)
+s1_chk_auditlog = widgets.Checkbox(
+    value=False,
+    description='Include AuditLog.Read.All (sign-in activity)',
+    indent=False
+)
+s1_chk_use_cache = widgets.Checkbox(
+    value=False,
+    description='Use cached AD file if available (skip Graph refresh)',
+    indent=False
+)
+s1_status = widgets.HTML(value="<i>Please login to Azure AD first</i>")
+s1_output = widgets.Output()
+
+# Helpers
+def load_latest_cache():
+    files = glob.glob(os.path.join(AD_CACHE_DIR, "ad_users_*.csv"))
+    if not files:
+        return None, None
+    latest = max(files, key=os.path.getmtime)
+    try:
+        df = pd.read_csv(latest)
+        return df, latest
+    except Exception as e:
+        logger_s1.error(f"Failed to read cache {latest}: {e}")
+        return None, None
+
+# 5. Authentication Function
+def do_stage1_login(b):
+    global stage1_headers
+    
+    b.disabled = True
+    s1_status.value = "<span style='color:blue;'>🔄 Authenticating...</span>"
+    
+    try:
+        load_dotenv()
+        tid = os.getenv("AZURE_TENANT_ID")
+        cid = os.getenv("AZURE_CLIENT_ID")
+        
+        if not tid or not cid:
+            s1_status.value = "<span style='color:red;'>❌ Missing AZURE_TENANT_ID or AZURE_CLIENT_ID in .env</span>"
+            logger_s1.error("Missing Azure credentials in .env")
+            b.disabled = False
+            return
+        
+        app = PublicClientApplication(
+            cid,
+            authority=f"https://login.microsoftonline.com/{tid}"
+        )
+        
+        scopes = ["User.Read.All"]
+        if s1_chk_auditlog.value:
+            scopes.append("AuditLog.Read.All")
+        
+        result = app.acquire_token_interactive(
+            scopes=scopes,
+            prompt="select_account"
+        )
+        
+        if "access_token" in result:
+            stage1_headers = {"Authorization": f"Bearer {result['access_token']}"}
+            s1_status.value = "<span style='color:green;'>✅ Authentication Successful</span>"
+            s1_btn_download.disabled = False
+            s1_btn_refresh.disabled = False
+            logger_s1.info("Stage 1: Authentication successful")
+        else:
+            error_msg = result.get('error_description', 'Unknown error')
+            s1_status.value = f"<span style='color:red;'>❌ Authentication failed: {error_msg}</span>"
+            logger_s1.error(f"Authentication failed: {error_msg}")
+            
+    except Exception as e:
+        s1_status.value = f"<span style='color:red;'>❌ Error: {str(e)}</span>"
+        logger_s1.error(f"Login error: {str(e)}", exc_info=True)
+    finally:
+        b.disabled = False
+
+# 6. Download Function
+def do_stage1_download(b):
+    global stage1_ad_data, stage1_file_path
+    
+    if s1_chk_use_cache.value:
+        cached_df, cached_path = load_latest_cache()
+        if cached_df is not None:
+            stage1_ad_data = cached_df
+            stage1_file_path = cached_path
+            s1_status.value = f"<span style='color:green;'>✅ Loaded cache: {os.path.basename(cached_path)}</span>"
+            s1_output.clear_output()
+            with s1_output:
+                print("Loaded cached AD data →", cached_path)
+                print(f"Rows: {len(cached_df)}")
+            return
+    
+    if not stage1_headers:
+        s1_status.value = "<span style='color:red;'>❌ Please login first</span>"
+        return
+    
+    b.disabled = True
+    s1_btn_refresh.disabled = True
+    
+    s1_output.clear_output()
+    
+    with s1_output:
+        print("\n" + "="*60)
+        print("📥 Downloading Active Directory Users")
+        print("="*60)
+        print("\nFetching all users from Azure AD...\n")
+    
+    try:
+        session = requests.Session()
+        
+        progress = widgets.IntProgress(
+            value=0,
+            min=0,
+            max=100,
+            description='Progress:',
+            bar_style='info',
+            layout=widgets.Layout(width='80%')
+        )
+        status_label = widgets.HTML(value="Initializing...")
+        progress_box = widgets.VBox([progress, status_label])
+        
+        with s1_output:
+            display(progress_box)
+        
+        logger_s1.info("Starting AD user download...")
+        
+        requested_signin = s1_chk_auditlog.value
+        params_base = {
+            "$select": "id,mail,userPrincipalName,displayName,department,accountEnabled,jobTitle",
+            "$expand": "manager($select=displayName,mail,jobTitle,department)",
+            "$top": 999
+        }
+        params_with_signin = {
+            "$select": "id,mail,userPrincipalName,displayName,department,accountEnabled,jobTitle,signInActivity",
+            "$expand": "manager($select=displayName,mail,jobTitle,department)",
+            "$top": 999
+        }
+
+        use_signin_activity = False
+        manager_available = False
+
+        if requested_signin:
+            status_label.value = "Attempting to fetch with sign-in activity..."
+            progress.value = 10
+            response = session.get(USERS_URL, headers=stage1_headers, params=params_with_signin, timeout=30)
+        else:
+            status_label.value = "AuditLog scope unchecked; skipping sign-in activity"
+            progress.value = 10
+            response = session.get(USERS_URL, headers=stage1_headers, params=params_base, timeout=30)
+
+        if response.status_code == 200:
+            test_data = response.json()
+            sample_items = test_data.get('value', [])[:10]
+            has_signin_field = any('signInActivity' in item for item in sample_items)
+
+            # Probe audit endpoint to distinguish permission issues from sparse user fields.
+            signin_probe_status = None
+            if requested_signin:
+                try:
+                    probe_resp = session.get(
+                        "https://graph.microsoft.com/v1.0/auditLogs/signIns?$top=1",
+                        headers=stage1_headers,
+                        timeout=30
+                    )
+                    signin_probe_status = probe_resp.status_code
+                except Exception:
+                    signin_probe_status = None
+
+            if requested_signin:
+                if has_signin_field or signin_probe_status == 200:
+                    use_signin_activity = True
+                    logger_s1.info("✅ signInActivity feature enabled")
+                    with s1_output:
+                        print("✅ Sign-in activity feature enabled\n")
+                        if not has_signin_field:
+                            print("ℹ️ signInActivity may be empty for some users (sparse data).\n")
+                else:
+                    logger_s1.warning(
+                        f"⚠️ signInActivity unavailable. probe_status={signin_probe_status}"
+                    )
+                    with s1_output:
+                        if signin_probe_status in [401, 403]:
+                            print("⚠️ AuditLog permission was denied by Graph.")
+                        else:
+                            print("⚠️ signInActivity field not returned in sample response.")
+                        print("Continuing without last sign-in data...\n")
+
+            if sample_items and 'manager' in sample_items[0]:
+                manager_available = True
+                logger_s1.info("✅ Manager info available via $expand")
+                with s1_output:
+                    print("✅ Manager data available from Graph\n")
+        else:
+            logger_s1.warning(f"⚠️ initial query failed: {response.status_code}")
+            with s1_output:
+                print(f"⚠️ Initial query failed (status {response.status_code})")
+                print("Continuing with basic fields...\n")
+        
+        params = params_with_signin if use_signin_activity else params_base
+        
+        all_users = []
+        next_link = USERS_URL
+        page_count = 0
+        
+        status_label.value = "Downloading user data..."
+        progress.value = 20
+        
+        while next_link:
+            if page_count == 0:
+                response = session.get(next_link, headers=stage1_headers, params=params, timeout=30)
+            else:
+                response = session.get(next_link, headers=stage1_headers, timeout=30)
+            
+            if response.status_code != 200:
+                raise Exception(f"API Error: {response.status_code} - {response.text}")
+            
+            data = response.json()
+            users = data.get('value', [])
+            all_users.extend(users)
+            
+            page_count += 1
+            progress.value = min(20 + (page_count * 15), 80)
+            status_label.value = f"Downloaded {len(all_users)} users (page {page_count})..."
+            
+            next_link = data.get('@odata.nextLink')
+        
+        logger_s1.info(f"Downloaded {len(all_users)} users from AD")
+        logger_s1.info(
+            f"Users with no mail/UPN after fallback: {missing_address_count if 'missing_address_count' in locals() else 0}"
+        )
+
+        if not manager_available:
+            status_label.value = "Fetching managers (fallback)..."
+            progress.value = min(progress.value + 5, 85)
+            for i, user in enumerate(all_users):
+                uid = user.get('id')
+                if not uid:
+                    continue
+                mgr_resp = session.get(
+                    f"{USERS_URL}/{uid}/manager",
+                    headers=stage1_headers,
+                    params={"$select": "displayName,mail,jobTitle,department"},
+                    timeout=20
+                )
+                if mgr_resp.status_code == 200:
+                    user['manager'] = mgr_resp.json()
+                if i % 50 == 0:
+                    progress.value = min(85, progress.value + 1)
+                    status_label.value = f"Managers fetched: {i+1}/{len(all_users)}"
+        
+        status_label.value = "Processing user data..."
+        progress.value = 85
+        
+        def _signin_age_bucket(days_since_signin):
+            if days_since_signin is None:
+                return "No sign-in data"
+            if days_since_signin <= 30:
+                return "0-1 month"
+            if days_since_signin <= 60:
+                return "1-2 months"
+            if days_since_signin <= 90:
+                return "2-3 months"
+            if days_since_signin <= 180:
+                return "3-6 months"
+            if days_since_signin <= 365:
+                return "6-12 months"
+            return ">12 months"
+
+        def _activity_status_label(account_enabled: bool, days_since_signin):
+            bucket = _signin_age_bucket(days_since_signin)
+            if account_enabled:
+                if days_since_signin is None:
+                    return "Active (no sign-in data)"
+                if days_since_signin <= 90:
+                    return f"Active ({bucket})"
+                return f"Inactive ({bucket})"
+
+            if days_since_signin is None:
+                return "Disabled (no sign-in data)"
+            return f"Disabled (last sign-in: {bucket} ago)"
+
+        processed_users = []
+        missing_address_count = 0
+        now_utc = datetime.now().astimezone()
+
+        for user in all_users:
+            email = (user.get('mail') or user.get('userPrincipalName') or '').lower().strip()
+            if not email:
+                missing_address_count += 1
+                continue
+
+            user_data = {
+                'email': email,
+                'displayName': user.get('displayName', 'N/A'),
+                'department': user.get('department') or 'N/A',
+                'accountEnabled': user.get('accountEnabled', False),
+                'jobTitle': user.get('jobTitle') or 'N/A'
+            }
+
+            mgr = user.get('manager', {}) or {}
+            mgr_email = (mgr.get('mail') or '').lower().strip()
+            user_data['managerEmail'] = mgr_email if mgr_email else 'N/A'
+            user_data['managerName'] = mgr.get('displayName', 'N/A')
+            user_data['managerJobTitle'] = mgr.get('jobTitle', 'N/A')
+            user_data['managerDepartment'] = mgr.get('department', 'N/A')
+
+            days_since_signin = None
+            active_in_3_months = False
+
+            if use_signin_activity and isinstance(user.get('signInActivity'), dict):
+                signin_data = user.get('signInActivity') or {}
+                last_signin = signin_data.get('lastSignInDateTime', '')
+                user_data['lastSignInDateTime'] = last_signin if last_signin else 'Never'
+
+                if last_signin and last_signin != 'Never':
+                    try:
+                        signin_date = datetime.fromisoformat(last_signin.replace('Z', '+00:00'))
+                        days_since_signin = max(0, (now_utc - signin_date).days)
+                        active_in_3_months = days_since_signin <= 90
+                    except Exception:
+                        days_since_signin = None
+                        active_in_3_months = False
+            else:
+                user_data['lastSignInDateTime'] = 'N/A'
+
+            user_data['activeIn3MonthsFlag'] = active_in_3_months if use_signin_activity else 'N/A'
+            user_data['signInAgeRange'] = _signin_age_bucket(days_since_signin)
+            user_data['activeIn3Months'] = _activity_status_label(
+                bool(user_data['accountEnabled']),
+                days_since_signin
+            )
+
+            processed_users.append(user_data)
+        
+        stage1_ad_data = pd.DataFrame(processed_users)
+        
+        status_label.value = "Saving to file..."
+        progress.value = 95
+        
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M')
+        filename = f"ad_users_{timestamp}.csv"
+        stage1_file_path = os.path.join(AD_CACHE_DIR, filename)
+        
+        stage1_ad_data.to_csv(stage1_file_path, index=False)
+        
+        progress.value = 100
+        progress.bar_style = 'success'
+        status_label.value = "<span style='color:green;font-weight:bold;'>✅ Complete!</span>"
+        
+        total_users = len(stage1_ad_data)
+        active_users = stage1_ad_data['accountEnabled'].sum()
+        manager_known = (stage1_ad_data['managerEmail'] != 'N/A').sum()
+        
+        with s1_output:
+            print("\n" + "="*60)
+            print("📊 Download Complete")
+            print("="*60)
+            print(f"Total users:        {total_users}")
+            print(f"Active accounts:    {active_users}")
+            print(f"No mail/UPN skipped:{missing_address_count}")
+            if use_signin_activity:
+                active_3m = (stage1_ad_data['activeIn3MonthsFlag'] == True).sum()
+                print(f"Active in 3 months:  {active_3m}")
+            print(f"Manager linked:     {manager_known}")
+            print(f"\nSaved to: {stage1_file_path}")
+            print("="*60)
+        
+        s1_status.value = f"<span style='color:green;'>✅ Downloaded {total_users} users → {filename}</span>"
+        
+        logger_s1.info(f"Stage 1 complete: {total_users} users saved to {stage1_file_path}")
+        
+    except Exception as e:
+        with s1_output:
+            print(f"\n❌ Error: {str(e)}")
+        s1_status.value = f"<span style='color:red;'>❌ Error: {str(e)}</span>"
+        logger_s1.error(f"Download error: {str(e)}", exc_info=True)
+    finally:
+        b.disabled = False
+        s1_btn_refresh.disabled = False
+
+# 7. Bind Events
+s1_btn_login.on_click(do_stage1_login)
+s1_btn_download.on_click(do_stage1_download)
+s1_btn_refresh.on_click(do_stage1_download)
+
+# 8. UI Layout
+stage1_ui = widgets.VBox([
+    widgets.HTML("""
+        <div style='
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 20px;
+            border-radius: 8px;
+            color: white;
+            margin-bottom: 20px;
+        '>
+            <h2 style='margin: 0 0 10px 0;'>🛡️ Stage 1: AD User Download</h2>
+            <p style='margin: 0; opacity: 0.9;'>
+                Authenticate with Azure AD and download all users for validation
+            </p>
+        </div>
+    """),
+    widgets.HBox([s1_btn_login, s1_btn_download, s1_btn_refresh]),
+    s1_chk_auditlog,
+    s1_chk_use_cache,
+    s1_status,
+    s1_output
+])
+
+clear_output()
+display(stage1_ui)
+
+logger_s1.info("Stage 1 UI initialized")
+logger_s1.info("="*60)
+
+
+
+
