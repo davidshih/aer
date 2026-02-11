@@ -1,15 +1,88 @@
-# Debug token scopes and tenant
-token = result.get("access_token")
-parts = token.split(".")
-import base64, json
-payload = json.loads(base64.urlsafe_b64decode(parts[1] + "=="))
-print("tid:", payload.get("tid"))
-print("upn:", payload.get("upn") or payload.get("preferred_username"))
-print("scp:", payload.get("scp"))
+# === Mini Diagnostic Cell: Graph Permission Check (Delegated) ===
 
-# Minimal Graph test for signInActivity
+import os
+import json
+import base64
 import requests
-url = "https://graph.microsoft.com/v1.0/users?$top=1&$select=id,displayName,signInActivity"
-r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=30)
-print("status:", r.status_code)
-print("body:", r.text[:1000])
+
+# Optional: paste token manually if stage1_headers is not available
+ACCESS_TOKEN = None
+
+def _extract_token():
+    # 1) Manual token
+    if ACCESS_TOKEN and isinstance(ACCESS_TOKEN, str):
+        return ACCESS_TOKEN.strip()
+
+    # 2) Existing stage1 headers from previous login cell
+    hdrs = globals().get("stage1_headers", {})
+    auth = hdrs.get("Authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+
+    # 3) Env fallback
+    env_tok = os.getenv("ACCESS_TOKEN", "").strip()
+    if env_tok:
+        return env_tok
+
+    raise RuntimeError("No access token found. Login first or set ACCESS_TOKEN.")
+
+def _decode_jwt_payload(token: str):
+    # JWT payload is the second segment
+    part = token.split(".")[1]
+    part += "=" * (-len(part) % 4)  # pad base64
+    return json.loads(base64.urlsafe_b64decode(part.encode("utf-8")).decode("utf-8"))
+
+def _call_graph(token: str, name: str, url: str):
+    print(f"\n=== {name} ===")
+    r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=30)
+    print("HTTP:", r.status_code)
+    try:
+        data = r.json()
+    except Exception:
+        print("Body (raw):", r.text[:1000])
+        return
+
+    if r.status_code >= 400:
+        err = data.get("error", {})
+        print("error.code:", err.get("code"))
+        print("error.message:", err.get("message"))
+    else:
+        print("OK. Keys:", list(data.keys()))
+        if "value" in data:
+            print("value count:", len(data["value"]))
+
+token = _extract_token()
+claims = _decode_jwt_payload(token)
+
+print("tid:", claims.get("tid"))
+print("upn/preferred_username:", claims.get("upn") or claims.get("preferred_username"))
+print("scp:", claims.get("scp"))
+print("roles:", claims.get("roles"))
+
+# Basic token validity check
+_call_graph(
+    token,
+    "ME",
+    "https://graph.microsoft.com/v1.0/me?$select=id,displayName,userPrincipalName"
+)
+
+# Should usually work with User.Read.All
+_call_graph(
+    token,
+    "USERS basic",
+    "https://graph.microsoft.com/v1.0/users?$top=1&$select=id,displayName,mail"
+)
+
+# Often fails if AuditLog.Read.All / directory role is missing
+_call_graph(
+    token,
+    "USERS with signInActivity",
+    "https://graph.microsoft.com/v1.0/users?$top=1&$select=id,displayName,signInActivity"
+)
+
+# Strong audit permission check
+_call_graph(
+    token,
+    "Audit sign-ins",
+    "https://graph.microsoft.com/v1.0/auditLogs/signIns?$top=1"
+)
