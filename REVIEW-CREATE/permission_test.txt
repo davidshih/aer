@@ -1,0 +1,15 @@
+# Debug token scopes and tenant
+token = result.get("access_token")
+parts = token.split(".")
+import base64, json
+payload = json.loads(base64.urlsafe_b64decode(parts[1] + "=="))
+print("tid:", payload.get("tid"))
+print("upn:", payload.get("upn") or payload.get("preferred_username"))
+print("scp:", payload.get("scp"))
+
+# Minimal Graph test for signInActivity
+import requests
+url = "https://graph.microsoft.com/v1.0/users?$top=1&$select=id,displayName,signInActivity"
+r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=30)
+print("status:", r.status_code)
+print("body:", r.text[:1000])
