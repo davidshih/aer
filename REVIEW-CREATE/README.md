@@ -1,5 +1,25 @@
 # AER UI/UX Improvements
 
+> Note: This README originally documented the v7.5 UI component package.  
+> Current notebook workflow spec (0211) is tracked in:
+> - `SPEC.md`
+> - `docs/adr/ADR-0001-0211-architecture.md`
+
+## Current 0211 Checkpoint
+
+- Primary notebook artifact: `aer_create_0211.json`
+- Stages in active scope:
+  - Stage 1: AD download + cache
+  - Stage 1.5: Org tree + department head mapping
+  - Stage 2: Email/User validation
+  - Stage 3: Reviewer assignment + final output formatting
+
+### Key behavior snapshots
+- Cache source of truth: `input/ad_cache` (with output mirror fallback)
+- Stage 1.5 head logic: branch-boundary + service account filtering
+- Stage 2 email-first: email match => AD name enforced + 100% match
+- Stage 3 output: sorted and readability-formatted (auto width + wrap text)
+
 ## Overview
 
 This project enhances the AER (Access Review) Jupyter notebook with three new UI components:
