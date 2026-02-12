@@ -269,17 +269,8 @@ def categorize_user(row: pd.Series, ad_cache: Dict, name_index: Dict) -> Tuple[s
         metadata['ad_user'] = ad_user
         metadata['final_email'] = email_clean
         metadata['final_name'] = ad_user['name']
-
-        # Check name match
-        ad_name_norm = normalize_name(ad_user['name'])
-        input_name_norm = normalize_name(user_name)
-
-        if input_name_norm and ad_name_norm == input_name_norm:
-            metadata['validation_message'] = 'Perfect match'
-            return ValidationStatus.VALID_PERFECT, metadata
-        else:
-            metadata['validation_message'] = f"Name differs"
-            return ValidationStatus.WARN_NAME_MISMATCH, metadata
+        metadata['validation_message'] = 'Email matched in AD (AD name enforced)'
+        return ValidationStatus.VALID_PERFECT, metadata
 
     # Case 3: Email missing, try fuzzy match
     if not user_name or pd.isna(user_name) or str(user_name).strip() == '':
