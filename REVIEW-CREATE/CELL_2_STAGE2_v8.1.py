@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
 """
-Stage 2: Email/User Validation with Enhanced UI (Jupyter Cell) v8.1
+Stage 2: Email/User Validation with Compact Review UI (Jupyter Cell) v8.1
 
-Changes from v8.0:
-1. Fold (collapsible accordion) 100% perfect matches instead of hiding
-2. Fuzzy matches < 80% require manual selection (no auto-populate)
-3. Output includes Department and is_AD_active columns from AD cache
-4. Delete button on each review row — removes from UI and output
-5. All displayed records (even empty inputs) saved unless explicitly deleted
+Short Description:
+Compact non-100% match review table designed for 30+ manual updates.
+
+Modified:
+2026-02-11 07:40 -0500
+
+Key Rules:
+1. 100% perfect matches are folded into a collapsible section.
+2. All non-100% records are displayed in one compact review table.
+3. Candidate preselect is allowed only when top score >= 90.
+4. Dropdown options include candidate AD status and last update status.
+5. Unselected rows are still included in output as unresolved.
 
 Copy and paste this entire cell into Jupyter notebook and run.
 """
@@ -193,11 +199,20 @@ def load_ad_cache():
             if not email or email == 'nan':
                 continue
 
+            active_raw = row.get('accountEnabled', False)
+            if isinstance(active_raw, str):
+                active_raw = active_raw.strip().lower() in ['true', '1', 'yes', 'y']
+
+            last_update = row.get('activeIn3Months', row.get('signInAgeRange', row.get('lastSignInDateTime', 'N/A')))
+            if pd.isna(last_update):
+                last_update = 'N/A'
+
             stage2_ad_cache[email] = {
                 'email': email,
-                'name': row['displayName'],
-                'dept': row['department'],
-                'active': row['accountEnabled']
+                'name': row.get('displayName', ''),
+                'dept': row.get('department', ''),
+                'active': bool(active_raw),
+                'last_update_status': str(last_update)
             }
 
             # Build name index
@@ -297,183 +312,190 @@ def categorize_user(row: pd.Series, ad_cache: Dict, name_index: Dict) -> Tuple[s
 # UI Components
 # ============================================
 
-def create_fuzzy_unique_row(idx: int, row: pd.Series, metadata: Dict):
-    """Green row for single fuzzy match, with delete button"""
-    original_name = str(metadata['original_name'])
-    match = metadata['fuzzy_matches'][0]
-
-    name_html = f"""
-    <div style='width:220px; padding:5px;'>
-        <b style='color:#34c759;'>✓ {original_name}</b>
-        <br><small style='color:#34c759;'>Match: {match['score']}%</small>
-    </div>
-    """
-
-    info_html = f"""
-    <div style='padding:5px; border:1px solid #34c759; background:#e8f5e9; border-radius:4px; width:500px;'>
-        <b style='color:#34c759;'>✅ Single Match</b><br>
-        <b>{match['name']}</b> ({match['email']})<br>
-        Dept: {match['dept']} | Confidence: {match['score']}%
-    </div>
-    """
-
-    btn_delete = widgets.Button(
-        description='✕',
-        button_style='danger',
-        layout=widgets.Layout(width='36px', height='30px'),
-        tooltip='Remove this record'
+def _candidate_option_label(match: Dict) -> str:
+    """Build compact dropdown label with AD status and last update."""
+    ad = stage2_ad_cache.get(match['email'], {})
+    ad_status = 'Active' if ad.get('active') else 'Disabled'
+    last_update = ad.get('last_update_status', 'N/A')
+    return (
+        f"{match['name']} | {match['email']} | {match['dept']} | "
+        f"Score {match['score']}% | AD:{ad_status} | Last:{last_update}"
     )
 
-    container = widgets.HBox([
-        widgets.HTML(value=name_html),
-        widgets.HTML(value=info_html),
-        btn_delete
-    ])
 
-    result = {
-        'index': idx,
-        'row': container,
-        'selected_email': match['email'],
-        'selected_name': match['name'],
-        'deleted': False
-    }
+def create_compact_review_row(item: Dict, status: str) -> Dict:
+    """Create a compact row for all non-100% review actions."""
+    metadata = item['metadata']
+    input_name = str(metadata.get('original_name', '') or '').strip() or '(blank)'
+    input_email = str(metadata.get('original_email', '') or '').strip() or '(blank)'
 
-    def on_delete(b):
-        result['deleted'] = True
-        container.layout.display = 'none'
+    input_html = widgets.HTML(
+        value=(
+            "<div style='width:240px; line-height:1.2;'>"
+            f"<div style='font-weight:600;'>{input_name}</div>"
+            f"<div style='font-size:12px; color:#666;'>{input_email}</div>"
+            "</div>"
+        )
+    )
 
-    btn_delete.on_click(on_delete)
-    return result
+    if status in [ValidationStatus.INFO_FUZZY_UNIQUE, ValidationStatus.ERR_FUZZY_MULTIPLE]:
+        fuzzy_matches = metadata.get('fuzzy_matches', [])
+        top_score = fuzzy_matches[0]['score'] if fuzzy_matches else 0
 
+        options = [('-- Select Candidate --', '')]
+        for match in fuzzy_matches:
+            options.append((_candidate_option_label(match), match['email']))
+        options.append(('-- Manual Entry --', 'MANUAL'))
 
-def create_fuzzy_multiple_row(idx: int, row: pd.Series, metadata: Dict):
-    """Orange row for multiple fuzzy matches or low-confidence single match"""
-    original_name = str(metadata['original_name'])
-    fuzzy_matches = metadata['fuzzy_matches']
-    is_low_confidence = len(fuzzy_matches) == 1
+        default_value = fuzzy_matches[0]['email'] if fuzzy_matches and top_score >= 90 else ''
 
-    if is_low_confidence:
-        badge_text = f"Low confidence: {fuzzy_matches[0]['score']}%"
+        dropdown = widgets.Dropdown(
+            options=options,
+            value=default_value,
+            layout=widgets.Layout(width='760px')
+        )
+
+        txt_manual = widgets.Text(
+            placeholder='Enter email manually',
+            layout=widgets.Layout(width='280px'),
+            disabled=True
+        )
+
+        status_text = (
+            f"Top {top_score}% | {'Preselected' if default_value else 'Manual Select'}"
+            if fuzzy_matches else 'No candidate'
+        )
+        status_html = widgets.HTML(
+            value=f"<div style='width:180px; font-size:12px; color:#b26a00;'>{status_text}</div>"
+        )
+
+        def on_dropdown_change(change):
+            if change['new'] == 'MANUAL':
+                txt_manual.disabled = False
+            else:
+                txt_manual.disabled = True
+                txt_manual.value = ''
+
+        dropdown.observe(on_dropdown_change, names='value')
+
+        btn_delete = widgets.Button(
+            description='✕',
+            button_style='danger',
+            layout=widgets.Layout(width='34px', height='28px'),
+            tooltip='Remove this record'
+        )
+
+        row_widget = widgets.HBox([
+            input_html,
+            status_html,
+            dropdown,
+            txt_manual,
+            btn_delete
+        ], layout=widgets.Layout(align_items='center'))
+
+        result = {
+            'row_type': 'candidate',
+            'source_status': status,
+            'item': item,
+            'metadata': metadata,
+            'dropdown': dropdown,
+            'manual_input': txt_manual,
+            'row': row_widget,
+            'deleted': False
+        }
+
+    elif status == ValidationStatus.WARN_NAME_MISMATCH:
+        ad_user = metadata.get('ad_user', {})
+        ad_name = ad_user.get('name', '(N/A)')
+        ad_email = metadata.get('final_email', '(N/A)')
+
+        decision = widgets.Dropdown(
+            options=[
+                ('Use AD Name', 'AD_NAME'),
+                ('Keep Input Name', 'INPUT_NAME')
+            ],
+            value='AD_NAME',
+            layout=widgets.Layout(width='360px')
+        )
+
+        status_html = widgets.HTML(
+            value=(
+                "<div style='width:180px; font-size:12px; color:#b26a00;'>"
+                "Email verified, name mismatch"
+                "</div>"
+            )
+        )
+
+        info_html = widgets.HTML(
+            value=(
+                "<div style='width:680px; font-size:12px; line-height:1.2;'>"
+                f"AD: <b>{ad_name}</b> ({ad_email})"
+                "</div>"
+            )
+        )
+
+        btn_delete = widgets.Button(
+            description='✕',
+            button_style='danger',
+            layout=widgets.Layout(width='34px', height='28px'),
+            tooltip='Remove this record'
+        )
+
+        row_widget = widgets.HBox([
+            input_html,
+            status_html,
+            decision,
+            info_html,
+            btn_delete
+        ], layout=widgets.Layout(align_items='center'))
+
+        result = {
+            'row_type': 'mismatch',
+            'source_status': status,
+            'item': item,
+            'metadata': metadata,
+            'decision': decision,
+            'row': row_widget,
+            'deleted': False
+        }
+
     else:
-        badge_text = f"{len(fuzzy_matches)} matches"
+        raise ValueError(f'Unsupported review row status: {status}')
 
-    name_html = f"""
-    <div style='width:220px; padding:5px;'>
-        <b style='color:#ff9500;'>⚠️ {original_name}</b>
-        <br><small style='color:#ff9500;'>{badge_text}</small>
-    </div>
-    """
-
-    options = [('-- Select --', '')]
-    for match in fuzzy_matches:
-        label = f"{match['name']} ({match['email']}) - {match['dept']} [{match['score']}%]"
-        options.append((label, match['email']))
-    options.append(('-- Manual Entry --', 'MANUAL'))
-
-    # Low-confidence single match: don't pre-select, force manual choice
-    default_value = '' if is_low_confidence else fuzzy_matches[0]['email']
-
-    dropdown = widgets.Dropdown(
-        options=options,
-        value=default_value,
-        description='',
-        layout=widgets.Layout(width='550px')
-    )
-
-    txt_manual = widgets.Text(
-        placeholder='Enter email manually',
-        layout=widgets.Layout(width='300px'),
-        disabled=True
-    )
-
-    def on_dropdown_change(change):
-        if change['new'] == 'MANUAL':
-            txt_manual.disabled = False
-        else:
-            txt_manual.disabled = True
-            txt_manual.value = ''
-
-    dropdown.observe(on_dropdown_change, names='value')
-
-    btn_delete = widgets.Button(
-        description='✕',
-        button_style='danger',
-        layout=widgets.Layout(width='36px', height='30px'),
-        tooltip='Remove this record'
-    )
-
-    container = widgets.HBox([
-        widgets.HTML(value=name_html),
-        dropdown,
-        txt_manual,
-        btn_delete
-    ])
-
-    result = {
-        'index': idx,
-        'dropdown': dropdown,
-        'manual_input': txt_manual,
-        'metadata': metadata,
-        'row': container,
-        'deleted': False
-    }
-
-    def on_delete(b):
+    def on_delete(_):
         result['deleted'] = True
-        container.layout.display = 'none'
+        result['row'].layout.display = 'none'
 
     btn_delete.on_click(on_delete)
     return result
 
 
-def create_mismatch_row(idx: int, row: pd.Series, metadata: Dict):
-    """Yellow row for name mismatch"""
-    original_email = metadata['original_email']
-    original_name = metadata['original_name']
-    ad_user = metadata['ad_user']
-
-    chk_accept = widgets.Checkbox(
-        value=True,
-        description='Accept AD Name',
-        indent=False
+def build_compact_review_section(review_rows: List[Dict]) -> widgets.VBox:
+    """Build compact scrollable section for all non-100% review rows."""
+    header = widgets.HTML(
+        value=(
+            "<div style='display:flex; gap:10px; font-weight:700; padding:6px 8px; "
+            "background:#f5f6f8; border:1px solid #ddd; border-bottom:none;'>"
+            "<div style='width:240px;'>Input</div>"
+            "<div style='width:180px;'>Review Hint</div>"
+            "<div style='width:760px;'>Selection (preselect only if >=90)</div>"
+            "<div style='width:280px;'>Manual / Note</div>"
+            "<div style='width:34px;'>Del</div>"
+            "</div>"
+        )
     )
 
-    info_html = f"""
-    <div style='padding:5px; border:1px solid #ff9800; background:#fff3e0; border-radius:4px;'>
-        <b style='color:#ff9800;'>⚠️ Name Mismatch</b><br>
-        Input: {original_name}<br>
-        AD: {ad_user['name']}<br>
-        Email: {original_email} ✅
-    </div>
-    """
-
-    btn_delete = widgets.Button(
-        description='✕',
-        button_style='danger',
-        layout=widgets.Layout(width='36px', height='30px'),
-        tooltip='Remove this record'
+    rows_box = widgets.VBox(
+        [r['row'] for r in review_rows],
+        layout=widgets.Layout(
+            border='1px solid #ddd',
+            max_height='560px',
+            overflow='auto',
+            padding='6px'
+        )
     )
 
-    container = widgets.HBox([
-        chk_accept,
-        widgets.HTML(value=info_html),
-        btn_delete
-    ])
-
-    result = {
-        'index': idx,
-        'accept_checkbox': chk_accept,
-        'metadata': metadata,
-        'row': container,
-        'deleted': False
-    }
-
-    def on_delete(b):
-        result['deleted'] = True
-        container.layout.display = 'none'
-
-    btn_delete.on_click(on_delete)
-    return result
+    return widgets.VBox([header, rows_box])
 
 
 # ============================================
@@ -481,7 +503,7 @@ def create_mismatch_row(idx: int, row: pd.Series, metadata: Dict):
 # ============================================
 
 def do_validation(b):
-    """Validate uploaded file"""
+    """Validate uploaded file and build compact review UI."""
     global stage2_input_df, stage2_input_filename, stage2_categorized, stage2_ui_rows
 
     s2_output.clear_output()
@@ -495,11 +517,12 @@ def do_validation(b):
 
     try:
         with s2_output:
-            print("\n" + "="*60)
+            print()
+            print("=" * 60)
             print("🔍 Stage 2: Email/User Validation")
-            print("="*60 + "\n")
+            print("=" * 60)
+            print()
 
-        # Load file
         f_item = s2_upload.value[0]
         stage2_input_filename = f_item['name']
 
@@ -511,26 +534,19 @@ def do_validation(b):
         with s2_output:
             print(f"📄 Loaded: {stage2_input_filename}")
             print(f"   Rows: {len(stage2_input_df)}")
-            print(f"   Columns: {list(stage2_input_df.columns)}\n")
+            print(f"   Columns: {list(stage2_input_df.columns)}")
+            print()
 
-        # Categorize users
-        print("🔍 Categorizing users...")
         stage2_categorized = {}
-
         for idx, row in stage2_input_df.iterrows():
             status, metadata = categorize_user(row, stage2_ad_cache, stage2_name_index)
-
-            if status not in stage2_categorized:
-                stage2_categorized[status] = []
-
-            stage2_categorized[status].append({
+            stage2_categorized.setdefault(status, []).append({
                 'index': idx,
                 'row': row,
                 'metadata': metadata,
                 'status': status
             })
 
-        # Statistics
         stats = {status: len(stage2_categorized.get(status, [])) for status in [
             ValidationStatus.VALID_PERFECT,
             ValidationStatus.WARN_NAME_MISMATCH,
@@ -541,54 +557,51 @@ def do_validation(b):
             ValidationStatus.ERR_MISSING_DATA
         ]}
 
-        with s2_output:
-            print(f"\n📊 Validation Statistics:")
-            print(f"   ✅ Perfect Match (folded):      {stats[ValidationStatus.VALID_PERFECT]}")
-            print(f"   🔵 Single Fuzzy (>=80%):       {stats[ValidationStatus.INFO_FUZZY_UNIQUE]}")
-            print(f"   ⚠️  Name Mismatch:              {stats[ValidationStatus.WARN_NAME_MISMATCH]}")
-            print(f"   🟠 Manual Select (<80%/multi): {stats[ValidationStatus.ERR_FUZZY_MULTIPLE]}")
-            print(f"   ❌ Not Found:                  {stats[ValidationStatus.ERR_NOT_FOUND]}")
-            print(f"   ❌ Email Invalid:              {stats[ValidationStatus.ERR_EMAIL_INVALID]}")
-            print(f"   ⚪ Missing Data:               {stats[ValidationStatus.ERR_MISSING_DATA]}")
-            print(f"   📌 Total:                      {len(stage2_input_df)}\n")
+        candidate_items = (
+            stage2_categorized.get(ValidationStatus.INFO_FUZZY_UNIQUE, []) +
+            stage2_categorized.get(ValidationStatus.ERR_FUZZY_MULTIPLE, [])
+        )
+        preselect_90 = sum(
+            1 for it in candidate_items
+            if it['metadata'].get('fuzzy_matches') and it['metadata']['fuzzy_matches'][0].get('score', 0) >= 90
+        )
 
-        # Build UI
-        ui_sections = []
-        stage2_ui_rows = {
-            'fuzzy_unique': [],
-            'fuzzy_multiple': [],
-            'mismatch': []
+        group_counts = {
+            'G0_AUTO_100': stats[ValidationStatus.VALID_PERFECT],
+            'G1_REVIEW_90_PLUS': preselect_90,
+            'G2_REVIEW_70_89': max(0, len(candidate_items) - preselect_90),
+            'G3_REVIEW_NAME_MISMATCH': stats[ValidationStatus.WARN_NAME_MISMATCH],
+            'G4_REVIEW_NO_MATCH': stats[ValidationStatus.ERR_NOT_FOUND] + stats[ValidationStatus.ERR_EMAIL_INVALID],
+            'G5_REVIEW_MISSING_INPUT': stats[ValidationStatus.ERR_MISSING_DATA],
         }
 
-        # Summary
+        with s2_output:
+            print("📊 Group Summary:")
+            for key, val in group_counts.items():
+                print(f"   {key}: {val}")
+            print(f"   TOTAL: {len(stage2_input_df)}")
+            print()
+
+        ui_sections = []
+        stage2_ui_rows = {'review_rows': []}
+
         summary_html = f"""
         <div style='background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                    padding: 20px; border-radius: 8px; color: white; margin-bottom: 20px;'>
-            <h2 style='margin: 0 0 10px 0;'>🔍 Validation Results</h2>
-            <div style='display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px;'>
-                <div style='background: rgba(255,255,255,0.2); padding: 10px; border-radius: 5px; text-align: center;'>
-                    <div style='font-size: 24px; font-weight: bold;'>{stats[ValidationStatus.VALID_PERFECT]}</div>
-                    <div>✅ Perfect (Auto)</div>
-                </div>
-                <div style='background: rgba(52,199,89,0.3); padding: 10px; border-radius: 5px; text-align: center;'>
-                    <div style='font-size: 24px; font-weight: bold;'>{stats[ValidationStatus.INFO_FUZZY_UNIQUE]}</div>
-                    <div>🔵 Single</div>
-                </div>
-                <div style='background: rgba(255,149,0,0.3); padding: 10px; border-radius: 5px; text-align: center;'>
-                    <div style='font-size: 24px; font-weight: bold;'>{stats[ValidationStatus.ERR_FUZZY_MULTIPLE]}</div>
-                    <div>🟠 Multiple</div>
-                </div>
-                <div style='background: rgba(255,152,0,0.3); padding: 10px; border-radius: 5px; text-align: center;'>
-                    <div style='font-size: 24px; font-weight: bold;'>{stats[ValidationStatus.WARN_NAME_MISMATCH]}</div>
-                    <div>⚠️ Mismatch</div>
-                </div>
+                    padding: 16px; border-radius: 8px; color: white; margin-bottom: 16px;'>
+            <h2 style='margin: 0 0 8px 0;'>🔍 Validation Groups (Compact Mode)</h2>
+            <div style='display:grid; grid-template-columns:repeat(3, 1fr); gap:10px; font-size:13px;'>
+                <div>G0 Auto 100%: <b>{group_counts['G0_AUTO_100']}</b></div>
+                <div>G1 Review 90%+: <b>{group_counts['G1_REVIEW_90_PLUS']}</b></div>
+                <div>G2 Review 70-89%: <b>{group_counts['G2_REVIEW_70_89']}</b></div>
+                <div>G3 Name Mismatch: <b>{group_counts['G3_REVIEW_NAME_MISMATCH']}</b></div>
+                <div>G4 No Match: <b>{group_counts['G4_REVIEW_NO_MATCH']}</b></div>
+                <div>G5 Missing Input: <b>{group_counts['G5_REVIEW_MISSING_INPUT']}</b></div>
             </div>
         </div>
         """
         ui_sections.append(widgets.HTML(value=summary_html))
 
-        # Perfect matches (foldable accordion — collapsed by default)
-        if stats[ValidationStatus.VALID_PERFECT] > 0:
+        if group_counts['G0_AUTO_100'] > 0:
             perfect_rows_html = []
             for item in stage2_categorized.get(ValidationStatus.VALID_PERFECT, []):
                 m = item['metadata']
@@ -604,7 +617,7 @@ def do_validation(b):
                     f"</tr>"
                 )
             table_html = (
-                "<div style='max-height:400px; overflow:auto;'>"
+                "<div style='max-height:340px; overflow:auto;'>"
                 "<table style='width:100%; border-collapse:collapse;'>"
                 "<tr style='background:#e8f5e9; position:sticky; top:0;'>"
                 "<th style='padding:8px 10px; text-align:left; border-bottom:2px solid #4caf50;'>Name</th>"
@@ -615,65 +628,51 @@ def do_validation(b):
                 + ''.join(perfect_rows_html) +
                 "</table></div>"
             )
-            accordion_content = widgets.HTML(value=table_html)
-            accordion = widgets.Accordion(children=[accordion_content])
-            accordion.set_title(0, f"✅ Perfect Match ({stats[ValidationStatus.VALID_PERFECT]} records — auto-validated, click to expand)")
-            accordion.selected_index = None  # Collapsed by default
-            ui_sections.append(accordion)
+            acc = widgets.Accordion(children=[widgets.HTML(value=table_html)])
+            acc.set_title(0, f"✅ Perfect Match ({group_counts['G0_AUTO_100']} records — folded)")
+            acc.selected_index = None
+            ui_sections.append(acc)
 
-        # Single fuzzy matches
-        if stats[ValidationStatus.INFO_FUZZY_UNIQUE] > 0:
+        for status in [
+            ValidationStatus.INFO_FUZZY_UNIQUE,
+            ValidationStatus.ERR_FUZZY_MULTIPLE,
+            ValidationStatus.WARN_NAME_MISMATCH,
+        ]:
+            for item in stage2_categorized.get(status, []):
+                stage2_ui_rows['review_rows'].append(create_compact_review_row(item, status))
+
+        if stage2_ui_rows['review_rows']:
             ui_sections.append(widgets.HTML(value="""
-                <h3 style='color: #34c759; border-bottom: 2px solid #34c759; padding-bottom: 5px;'>
-                    🔵 Single Match (Auto-Selected)
-                </h3>
+                <h3 style='margin:16px 0 8px 0; color:#333;'>🧩 Non-100% Review Table (Compact)</h3>
+                <div style='font-size:12px; color:#666; margin-bottom:8px;'>
+                    Preselect policy: only top score >= 90. Unselected rows will still be exported as unresolved.
+                </div>
             """))
+            ui_sections.append(build_compact_review_section(stage2_ui_rows['review_rows']))
 
-            for item in stage2_categorized.get(ValidationStatus.INFO_FUZZY_UNIQUE, []):
-                row_ui = create_fuzzy_unique_row(item['index'], item['row'], item['metadata'])
-                stage2_ui_rows['fuzzy_unique'].append(row_ui)
-                ui_sections.append(row_ui['row'])
+        info_html = f"""
+        <div style='margin-top:16px; font-size:13px; color:#444;'>
+            <b>Auto-export unresolved buckets:</b>
+            Not Found={stats[ValidationStatus.ERR_NOT_FOUND]},
+            Email Invalid={stats[ValidationStatus.ERR_EMAIL_INVALID]},
+            Missing Data={stats[ValidationStatus.ERR_MISSING_DATA]}
+        </div>
+        """
+        ui_sections.append(widgets.HTML(value=info_html))
 
-        # Multiple fuzzy matches
-        if stats[ValidationStatus.ERR_FUZZY_MULTIPLE] > 0:
-            ui_sections.append(widgets.HTML(value="""
-                <h3 style='color: #ff9500; border-bottom: 2px solid #ff9500; padding-bottom: 5px; margin-top: 30px;'>
-                    🟠 Multiple Matches - Select One
-                </h3>
-            """))
-
-            for item in stage2_categorized.get(ValidationStatus.ERR_FUZZY_MULTIPLE, []):
-                row_ui = create_fuzzy_multiple_row(item['index'], item['row'], item['metadata'])
-                stage2_ui_rows['fuzzy_multiple'].append(row_ui)
-                ui_sections.append(row_ui['row'])
-
-        # Name mismatches
-        if stats[ValidationStatus.WARN_NAME_MISMATCH] > 0:
-            ui_sections.append(widgets.HTML(value="""
-                <h3 style='color: #ff9800; border-bottom: 2px solid #ff9800; padding-bottom: 5px; margin-top: 30px;'>
-                    ⚠️ Name Mismatch - Review
-                </h3>
-            """))
-
-            for item in stage2_categorized.get(ValidationStatus.WARN_NAME_MISMATCH, []):
-                row_ui = create_mismatch_row(item['index'], item['row'], item['metadata'])
-                stage2_ui_rows['mismatch'].append(row_ui)
-                ui_sections.append(row_ui['row'])
-
-        # Save button
-        ui_sections.append(widgets.HTML(value="<hr style='margin: 30px 0;'>"))
+        ui_sections.append(widgets.HTML(value="<hr style='margin: 20px 0;'>"))
         ui_sections.append(widgets.HBox([s2_btn_save]))
 
-        # Display UI
         with s2_output:
             display(widgets.VBox(ui_sections))
 
         s2_btn_save.disabled = False
-        s2_status.value = f"<span style='color:green;'>✅ Validation complete</span>"
+        s2_status.value = "<span style='color:green;'>✅ Validation complete</span>"
 
     except Exception as e:
         with s2_output:
-            print(f"\n❌ Error: {str(e)}")
+            print()
+            print(f"❌ Error: {str(e)}")
         s2_status.value = f"<span style='color:red;'>❌ Error: {str(e)}</span>"
     finally:
         b.disabled = False
@@ -684,7 +683,7 @@ def do_validation(b):
 # ============================================
 
 def do_save(b):
-    """Save validated file"""
+    """Save validated file with unresolved rows included."""
     if stage2_input_df is None:
         print("❌ No data to save")
         return
@@ -692,20 +691,19 @@ def do_save(b):
     b.disabled = True
 
     try:
-        print("\n💾 Saving validated file...")
+        print()
+        print("💾 Saving validated file...")
 
         validated_rows = []
         skipped_count = 0
         deleted_count = 0
 
         def _ad_fields(email_key):
-            """Look up Department and is_AD_active from AD cache"""
             if email_key and email_key in stage2_ad_cache:
                 ad = stage2_ad_cache[email_key]
                 return ad.get('dept', ''), 'Yes' if ad.get('active') else 'No'
             return '', ''
 
-        # 1. Perfect matches (folded)
         for item in stage2_categorized.get(ValidationStatus.VALID_PERFECT, []):
             row_data = item['row'].to_dict()
             metadata = item['metadata']
@@ -715,80 +713,69 @@ def do_save(b):
             row_data['Validation Status'] = ValidationStatus.get_display_text(ValidationStatus.VALID_PERFECT)
             validated_rows.append(row_data)
 
-        # 2. Single fuzzy matches (>= 80%)
-        for row_ui in stage2_ui_rows['fuzzy_unique']:
+        for row_ui in stage2_ui_rows.get('review_rows', []):
             if row_ui.get('deleted'):
                 deleted_count += 1
                 continue
-            item = stage2_categorized[ValidationStatus.INFO_FUZZY_UNIQUE][stage2_ui_rows['fuzzy_unique'].index(row_ui)]
-            row_data = item['row'].to_dict()
-            row_data['Email'] = row_ui['selected_email']
-            row_data['User Name'] = row_ui['selected_name']
-            row_data['Department'], row_data['is_AD_active'] = _ad_fields(row_ui['selected_email'])
-            row_data['Validation Status'] = ValidationStatus.get_display_text(ValidationStatus.INFO_FUZZY_UNIQUE)
-            validated_rows.append(row_data)
 
-        # 3. Multiple fuzzy matches / low-confidence singles
-        for row_ui in stage2_ui_rows['fuzzy_multiple']:
-            if row_ui.get('deleted'):
-                deleted_count += 1
-                continue
-            item = stage2_categorized[ValidationStatus.ERR_FUZZY_MULTIPLE][stage2_ui_rows['fuzzy_multiple'].index(row_ui)]
-            row_data = item['row'].to_dict()
-
-            selected = row_ui['dropdown'].value
-            is_manual = (selected == 'MANUAL')
-
-            if is_manual:
-                selected = row_ui['manual_input'].value.strip().lower()
-
-            if selected:
-                found = False
-                for match in row_ui['metadata']['fuzzy_matches']:
-                    if match['email'] == selected:
-                        row_data['Email'] = match['email']
-                        row_data['User Name'] = match['name']
-                        found = True
-                        break
-
-                if is_manual and not found:
-                    row_data['Email'] = selected
-                    if selected in stage2_ad_cache:
-                        row_data['User Name'] = stage2_ad_cache[selected]['name']
-
-                row_data['Department'], row_data['is_AD_active'] = _ad_fields(selected)
-                row_data['Validation Status'] = "🔧 Manually Resolved" if is_manual else ValidationStatus.get_display_text(ValidationStatus.ERR_FUZZY_MULTIPLE)
-                validated_rows.append(row_data)
-            else:
-                # User didn't select anything — still include with warning
-                row_data['Department'] = ''
-                row_data['is_AD_active'] = ''
-                row_data['Validation Status'] = "⚠️ Unresolved (No Selection Made)"
-                validated_rows.append(row_data)
-                skipped_count += 1
-
-        # 4. Name mismatches
-        for row_ui in stage2_ui_rows['mismatch']:
-            if row_ui.get('deleted'):
-                deleted_count += 1
-                continue
-            item = stage2_categorized[ValidationStatus.WARN_NAME_MISMATCH][stage2_ui_rows['mismatch'].index(row_ui)]
+            item = row_ui['item']
             row_data = item['row'].to_dict()
             metadata = row_ui['metadata']
 
-            if row_ui['accept_checkbox'].value:
-                row_data['Email'] = metadata['final_email']
-                row_data['User Name'] = metadata['final_name']
-                row_data['Validation Status'] = "✅ Name Mismatch Resolved (AD Name)"
-            else:
-                row_data['Email'] = metadata['final_email']
-                row_data['User Name'] = metadata['original_name']
-                row_data['Validation Status'] = "⚠️ Name Mismatch (Kept Original)"
+            if row_ui['row_type'] == 'candidate':
+                selected = row_ui['dropdown'].value
+                is_manual = (selected == 'MANUAL')
 
-            row_data['Department'], row_data['is_AD_active'] = _ad_fields(metadata['final_email'])
-            validated_rows.append(row_data)
+                if is_manual:
+                    selected_email = row_ui['manual_input'].value.strip().lower()
+                else:
+                    selected_email = str(selected or '').strip().lower()
 
-        # 5. Errors (included with empty AD fields)
+                if selected_email:
+                    matched = None
+                    for m in metadata.get('fuzzy_matches', []):
+                        if m['email'] == selected_email:
+                            matched = m
+                            break
+
+                    row_data['Email'] = selected_email
+
+                    if matched:
+                        row_data['User Name'] = matched['name']
+                    elif selected_email in stage2_ad_cache:
+                        row_data['User Name'] = stage2_ad_cache[selected_email]['name']
+
+                    row_data['Department'], row_data['is_AD_active'] = _ad_fields(selected_email)
+
+                    if is_manual:
+                        row_data['Validation Status'] = "🔧 Manually Resolved"
+                    else:
+                        if row_ui['source_status'] == ValidationStatus.INFO_FUZZY_UNIQUE:
+                            row_data['Validation Status'] = "✅ Candidate Selected (90% preselect policy)"
+                        else:
+                            row_data['Validation Status'] = ValidationStatus.get_display_text(ValidationStatus.ERR_FUZZY_MULTIPLE)
+                else:
+                    row_data['Department'] = ''
+                    row_data['is_AD_active'] = ''
+                    row_data['Validation Status'] = "⚠️ Unresolved (No Selection Made)"
+                    skipped_count += 1
+
+                validated_rows.append(row_data)
+
+            elif row_ui['row_type'] == 'mismatch':
+                decision = row_ui['decision'].value
+                row_data['Email'] = metadata['final_email']
+
+                if decision == 'AD_NAME':
+                    row_data['User Name'] = metadata['final_name']
+                    row_data['Validation Status'] = "✅ Name Mismatch Resolved (AD Name)"
+                else:
+                    row_data['User Name'] = metadata['original_name']
+                    row_data['Validation Status'] = "⚠️ Name Mismatch (Kept Original)"
+
+                row_data['Department'], row_data['is_AD_active'] = _ad_fields(metadata['final_email'])
+                validated_rows.append(row_data)
+
         for status in [ValidationStatus.ERR_NOT_FOUND, ValidationStatus.ERR_EMAIL_INVALID, ValidationStatus.ERR_MISSING_DATA]:
             for item in stage2_categorized.get(status, []):
                 row_data = item['row'].to_dict()
@@ -797,21 +784,17 @@ def do_save(b):
                 row_data['Validation Status'] = ValidationStatus.get_display_text(status)
                 validated_rows.append(row_data)
 
-        # Warn about unresolved/deleted rows
         if skipped_count > 0:
-            print(f"⚠️  {skipped_count} rows had no selection — marked as 'Unresolved'")
+            print(f"⚠️  {skipped_count} rows had no selection — marked as unresolved")
         if deleted_count > 0:
             print(f"🗑️  {deleted_count} rows deleted by user — excluded from output")
 
-        # Create output
         output_df = pd.DataFrame(validated_rows)
         priority_cols = ['Validation Status', 'Email', 'User Name', 'Department', 'is_AD_active']
         other_cols = [c for c in output_df.columns if c not in priority_cols]
-        cols = priority_cols + other_cols
-        cols = [c for c in cols if c in output_df.columns]
+        cols = [c for c in priority_cols + other_cols if c in output_df.columns]
         output_df = output_df[cols]
 
-        # Save
         base_name = stage2_input_filename.replace('.csv', '').replace('.xlsx', '')
         date_str = datetime.now().strftime('%Y%m%d')
         output_filename = f"{base_name}_validated_{date_str}.xlsx"
@@ -819,14 +802,16 @@ def do_save(b):
 
         output_df.to_excel(output_path, index=False, sheet_name='Validated')
 
-        print(f"\n✅ Saved: {output_path}")
+        print()
+        print(f"✅ Saved: {output_path}")
         print(f"   Rows: {len(output_df)}")
         print(f"   Columns: {list(output_df.columns)}")
 
         s2_status.value = f"<span style='color:blue;'>✅ Saved: {output_filename}</span>"
 
     except Exception as e:
-        print(f"\n❌ Save error: {str(e)}")
+        print()
+        print(f"❌ Save error: {str(e)}")
         s2_status.value = f"<span style='color:red;'>❌ Error: {str(e)}</span>"
     finally:
         b.disabled = False
