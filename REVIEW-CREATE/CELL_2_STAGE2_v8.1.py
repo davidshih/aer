@@ -6,10 +6,10 @@ Short Description:
 Compact non-100% match review table designed for 30+ manual updates.
 
 Modified:
-2026-02-12 10:20 -0500
+2026-02-12 11:10 -0500
 
 Key Rules:
-1. 100% perfect matches are folded into a collapsible section.
+1. 100% perfect matches stay folded with summary only (no record list).
 2. All non-100% records are displayed in one compact review table.
 3. Candidate preselect is allowed only when top score >= 90.
 4. Dropdown options include candidate AD status and last update status.
@@ -48,7 +48,8 @@ except ImportError:
 
 today_str = datetime.now().strftime('%Y-%m-%d')
 BASE_DIR = os.path.join("output", today_str)
-AD_CACHE_DIR = os.path.join(BASE_DIR, "ad_cache")
+OUTPUT_AD_CACHE_DIR = os.path.join(BASE_DIR, "ad_cache")
+INPUT_AD_CACHE_DIR = os.path.join("input", "ad_cache")
 STAGE2_DIR = os.path.join(BASE_DIR, "stage2_validated")
 LOG_DIR = os.path.join(BASE_DIR, "logs")
 os.makedirs(STAGE2_DIR, exist_ok=True)
@@ -186,7 +187,9 @@ def load_ad_cache():
     global stage2_ad_cache, stage2_name_index
 
     try:
-        cache_files = glob.glob(os.path.join(AD_CACHE_DIR, "ad_users_*.csv"))
+        cache_files = glob.glob(os.path.join(INPUT_AD_CACHE_DIR, "ad_users_*.csv"))
+        if not cache_files:
+            cache_files = glob.glob(os.path.join(OUTPUT_AD_CACHE_DIR, "ad_users_*.csv"))
         if not cache_files:
             return False, "No AD cache found. Please run Stage 1 first."
 
@@ -641,34 +644,15 @@ def do_validation(b):
         ui_sections.append(widgets.HTML(value=summary_html))
 
         if group_counts['G0_AUTO_100'] > 0:
-            perfect_rows_html = []
-            for item in stage2_categorized.get(ValidationStatus.VALID_PERFECT, []):
-                m = item['metadata']
-                ad = m.get('ad_user') or {}
-                dept = ad.get('dept', 'N/A')
-                active = 'Yes' if ad.get('active') else 'No'
-                perfect_rows_html.append(
-                    f"<tr>"
-                    f"<td style='padding:6px 10px; border-bottom:1px solid #eee;'>{m['final_name']}</td>"
-                    f"<td style='padding:6px 10px; border-bottom:1px solid #eee;'>{m['final_email']}</td>"
-                    f"<td style='padding:6px 10px; border-bottom:1px solid #eee;'>{dept}</td>"
-                    f"<td style='padding:6px 10px; border-bottom:1px solid #eee;'>{active}</td>"
-                    f"</tr>"
-                )
-            table_html = (
-                "<div style='max-height:340px; overflow:auto;'>"
-                "<table style='width:100%; border-collapse:collapse;'>"
-                "<tr style='background:#e8f5e9; position:sticky; top:0;'>"
-                "<th style='padding:8px 10px; text-align:left; border-bottom:2px solid #4caf50;'>Name</th>"
-                "<th style='padding:8px 10px; text-align:left; border-bottom:2px solid #4caf50;'>Email</th>"
-                "<th style='padding:8px 10px; text-align:left; border-bottom:2px solid #4caf50;'>Department</th>"
-                "<th style='padding:8px 10px; text-align:left; border-bottom:2px solid #4caf50;'>AD Active</th>"
-                "</tr>"
-                + ''.join(perfect_rows_html) +
-                "</table></div>"
+            summary_only_html = (
+                "<div style='padding:10px 12px; font-size:13px; color:#2e7d32; "
+                "background:#f1f8e9; border:1px solid #c8e6c9; border-radius:6px;'>"
+                f"✅ {group_counts['G0_AUTO_100']} perfect-match records are auto-resolved and hidden."
+                "<br>These records are still included in the final output file."
+                "</div>"
             )
-            acc = widgets.Accordion(children=[widgets.HTML(value=table_html)])
-            acc.set_title(0, f"✅ Perfect Match ({group_counts['G0_AUTO_100']} records — folded)")
+            acc = widgets.Accordion(children=[widgets.HTML(value=summary_only_html)])
+            acc.set_title(0, f"✅ Perfect Match ({group_counts['G0_AUTO_100']} records — hidden)")
             acc.selected_index = None
             ui_sections.append(acc)
 
