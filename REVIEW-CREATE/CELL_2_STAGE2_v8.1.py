@@ -6,7 +6,7 @@ Short Description:
 Compact non-100% match review table designed for 30+ manual updates.
 
 Modified:
-2026-02-11 07:40 -0500
+2026-02-12 10:20 -0500
 
 Key Rules:
 1. 100% perfect matches are folded into a collapsible section.
@@ -538,7 +538,26 @@ def do_validation(b):
             print()
 
         stage2_categorized = {}
-        for idx, row in stage2_input_df.iterrows():
+        total_rows = len(stage2_input_df)
+        progress = widgets.IntProgress(
+            value=0,
+            min=0,
+            max=max(total_rows, 1),
+            description='Processing:',
+            bar_style='info',
+            layout=widgets.Layout(width='680px')
+        )
+        progress_text = widgets.HTML(
+            value=f"<span style='font-size:12px; color:#555;'>0 / {total_rows} (0%)</span>"
+        )
+        started_at = datetime.now()
+
+        with s2_output:
+            display(widgets.VBox([progress, progress_text]))
+
+        update_every = 20 if total_rows >= 1000 else 10 if total_rows >= 300 else 5
+
+        for i, (idx, row) in enumerate(stage2_input_df.iterrows(), start=1):
             status, metadata = categorize_user(row, stage2_ad_cache, stage2_name_index)
             stage2_categorized.setdefault(status, []).append({
                 'index': idx,
@@ -546,6 +565,26 @@ def do_validation(b):
                 'metadata': metadata,
                 'status': status
             })
+
+            if i == 1 or i == total_rows or i % update_every == 0:
+                progress.value = i
+                pct = int((i / total_rows) * 100) if total_rows else 100
+                progress_text.value = (
+                    f"<span style='font-size:12px; color:#555;'>"
+                    f"{i} / {total_rows} ({pct}%)"
+                    f"</span>"
+                )
+
+        elapsed_sec = (datetime.now() - started_at).total_seconds()
+        progress.value = total_rows if total_rows else 1
+        progress.bar_style = 'success'
+        progress.description = 'Done:'
+        done_pct = 100 if total_rows else 0
+        progress_text.value = (
+            f"<span style='font-size:12px; color:#1b5e20;'>"
+            f"{total_rows} / {total_rows} ({done_pct}%) - Completed in {elapsed_sec:.1f}s"
+            f"</span>"
+        )
 
         stats = {status: len(stage2_categorized.get(status, [])) for status in [
             ValidationStatus.VALID_PERFECT,
