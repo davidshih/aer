@@ -6,7 +6,7 @@ Short Description:
 Compact non-100% match review table designed for 30+ manual updates.
 
 Modified:
-2026-02-12 11:10 -0500
+2026-02-12 11:36 -0500
 
 Key Rules:
 1. 100% perfect matches stay folded with summary only (no record list).
@@ -334,7 +334,7 @@ def create_compact_review_row(item: Dict, status: str) -> Dict:
 
     input_html = widgets.HTML(
         value=(
-            "<div style='width:240px; line-height:1.2;'>"
+            "<div style='width:240px; line-height:1.3;'>"
             f"<div style='font-weight:600;'>{input_name}</div>"
             f"<div style='font-size:12px; color:#666;'>{input_email}</div>"
             "</div>"
@@ -355,12 +355,12 @@ def create_compact_review_row(item: Dict, status: str) -> Dict:
         dropdown = widgets.Dropdown(
             options=options,
             value=default_value,
-            layout=widgets.Layout(width='760px')
+            layout=widgets.Layout(width='760px', height='36px')
         )
 
         txt_manual = widgets.Text(
             placeholder='Enter email manually',
-            layout=widgets.Layout(width='280px'),
+            layout=widgets.Layout(width='300px', height='36px'),
             disabled=True
         )
 
@@ -369,7 +369,7 @@ def create_compact_review_row(item: Dict, status: str) -> Dict:
             if fuzzy_matches else 'No candidate'
         )
         status_html = widgets.HTML(
-            value=f"<div style='width:180px; font-size:12px; color:#b26a00;'>{status_text}</div>"
+            value=f"<div style='width:180px; font-size:12px; line-height:1.3; color:#b26a00;'>{status_text}</div>"
         )
 
         def on_dropdown_change(change):
@@ -384,7 +384,7 @@ def create_compact_review_row(item: Dict, status: str) -> Dict:
         btn_delete = widgets.Button(
             description='✕',
             button_style='danger',
-            layout=widgets.Layout(width='34px', height='28px'),
+            layout=widgets.Layout(width='34px', height='32px'),
             tooltip='Remove this record'
         )
 
@@ -394,7 +394,7 @@ def create_compact_review_row(item: Dict, status: str) -> Dict:
             dropdown,
             txt_manual,
             btn_delete
-        ], layout=widgets.Layout(align_items='center'))
+        ], layout=widgets.Layout(align_items='center', min_height='48px', padding='4px 0'))
 
         result = {
             'row_type': 'candidate',
@@ -418,7 +418,7 @@ def create_compact_review_row(item: Dict, status: str) -> Dict:
                 ('Keep Input Name', 'INPUT_NAME')
             ],
             value='AD_NAME',
-            layout=widgets.Layout(width='360px')
+            layout=widgets.Layout(width='360px', height='36px')
         )
 
         status_html = widgets.HTML(
@@ -431,7 +431,7 @@ def create_compact_review_row(item: Dict, status: str) -> Dict:
 
         info_html = widgets.HTML(
             value=(
-                "<div style='width:680px; font-size:12px; line-height:1.2;'>"
+                "<div style='width:680px; font-size:12px; line-height:1.3;'>"
                 f"AD: <b>{ad_name}</b> ({ad_email})"
                 "</div>"
             )
@@ -440,7 +440,7 @@ def create_compact_review_row(item: Dict, status: str) -> Dict:
         btn_delete = widgets.Button(
             description='✕',
             button_style='danger',
-            layout=widgets.Layout(width='34px', height='28px'),
+            layout=widgets.Layout(width='34px', height='32px'),
             tooltip='Remove this record'
         )
 
@@ -450,7 +450,7 @@ def create_compact_review_row(item: Dict, status: str) -> Dict:
             decision,
             info_html,
             btn_delete
-        ], layout=widgets.Layout(align_items='center'))
+        ], layout=widgets.Layout(align_items='center', min_height='48px', padding='4px 0'))
 
         result = {
             'row_type': 'mismatch',
@@ -482,7 +482,7 @@ def build_compact_review_section(review_rows: List[Dict]) -> widgets.VBox:
             "<div style='width:240px;'>Input</div>"
             "<div style='width:180px;'>Review Hint</div>"
             "<div style='width:760px;'>Selection (preselect only if >=90)</div>"
-            "<div style='width:280px;'>Manual / Note</div>"
+            "<div style='width:300px;'>Manual / Note</div>"
             "<div style='width:34px;'>Del</div>"
             "</div>"
         )
