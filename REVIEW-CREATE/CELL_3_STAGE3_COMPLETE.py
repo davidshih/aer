@@ -240,6 +240,79 @@ def assign_reviewers(input_df, mapping_df):
     return output_df
 
 
+def _find_column_case_insensitive(df, candidates):
+    """Find first matching column name by case-insensitive exact match."""
+    lookup = {str(c).strip().lower(): c for c in df.columns}
+    for cand in candidates:
+        col = lookup.get(str(cand).strip().lower())
+        if col:
+            return col
+    return None
+
+
+def _is_yes(value) -> bool:
+    return str(value).strip().lower() == 'yes'
+
+
+def _is_inactive(value) -> bool:
+    v = str(value).strip().lower()
+    return v in {'no', 'false', '0', 'disabled', 'inactive'}
+
+
+def apply_final_layout_and_sort(df):
+    """
+    Reorder and sort final output for easier manual review.
+
+    Rules:
+    1) First columns: Validation Status, is_AD_active, Manual Review
+    2) Manual Review = Yes rows on top
+    3) Auto-matched + inactive AD rows at bottom
+    """
+    out = df.copy()
+
+    validation_col = _find_column_case_insensitive(out, ['Validation Status', 'Validation status'])
+    active_col = _find_column_case_insensitive(out, ['is_AD_active', 'is_ad_active'])
+    manual_col = _find_column_case_insensitive(out, ['Manual Review', 'manual_review', 'manu_review'])
+
+    if not manual_col:
+        out['Manual Review'] = ''
+        manual_col = 'Manual Review'
+
+    # Stable ordering anchor
+    out['_orig_order'] = range(len(out))
+
+    if validation_col is None:
+        out['_validation_tmp'] = ''
+        validation_col = '_validation_tmp'
+    if active_col is None:
+        out['_active_tmp'] = ''
+        active_col = '_active_tmp'
+
+    manual_yes = out[manual_col].map(_is_yes)
+    inactive_ad = out[active_col].map(_is_inactive)
+    auto_matched = out[validation_col].astype(str).str.lower().str.contains('auto', na=False)
+
+    # 0 = top, 1 = middle, 2 = bottom
+    out['_sort_bucket'] = 1
+    out.loc[manual_yes, '_sort_bucket'] = 0
+    out.loc[(~manual_yes) & inactive_ad & auto_matched, '_sort_bucket'] = 2
+
+    out = out.sort_values(by=['_sort_bucket', '_orig_order'], ascending=[True, True], kind='stable')
+
+    first_cols = []
+    for col in [validation_col, active_col, manual_col]:
+        if col in out.columns and col not in first_cols:
+            first_cols.append(col)
+    other_cols = [c for c in out.columns if c not in first_cols and not c.startswith('_')]
+    out = out[first_cols + other_cols]
+
+    drop_cols = [c for c in out.columns if c.startswith('_')]
+    if drop_cols:
+        out = out.drop(columns=drop_cols, errors='ignore')
+
+    return out
+
+
 def save_with_validation(df, output_path):
     """
     Save DataFrame to Excel with data validation for dropdown columns
@@ -297,6 +370,23 @@ def save_with_validation(df, output_path):
         ws.add_data_validation(dv)
         letter = get_column_letter(col_indices['reviewer_response'])
         dv.add(f"{letter}2:{letter}{len(df)+1}")
+
+    # Auto-fit column widths and enable wrap text for readability
+    for col_idx, col_name in enumerate(df.columns, 1):
+        letter = get_column_letter(col_idx)
+        col_values = [str(col_name)]
+        for val in df.iloc[:, col_idx - 1]:
+            if pd.isna(val):
+                continue
+            col_values.append(str(val))
+
+        max_len = max((len(v) for v in col_values), default=10)
+        width = min(max(12, max_len + 2), 60)
+        ws.column_dimensions[letter].width = width
+
+        for row_idx in range(2, len(df) + 2):
+            cell = ws[f"{letter}{row_idx}"]
+            cell.alignment = Alignment(wrap_text=True, vertical='top')
 
     wb.save(output_path)
     print(f"✅ Added dropdown validation for:")
@@ -455,13 +545,16 @@ def do_stage3_save(b):
         output_filename = f"{base_name}_review_{timestamp}.xlsx"
         output_path = os.path.join(STAGE3_DIR, output_filename)
 
-        # Save with validation
-        save_with_validation(stage3_final_df, output_path)
+        # Apply final sort/layout before save
+        final_df = apply_final_layout_and_sort(stage3_final_df)
+
+        # Save with validation + formatting
+        save_with_validation(final_df, output_path)
 
         with s3_output:
             print(f"✅ Saved to: {output_path}")
-            print(f"   Rows: {len(stage3_final_df)}")
-            print(f"   Columns: {list(stage3_final_df.columns)}")
+            print(f"   Rows: {len(final_df)}")
+            print(f"   Columns: {list(final_df.columns)}")
             print("="*60)
 
         s3_status.value = f"<span style='color:blue;'>✅ Saved: {output_filename}</span>"
