@@ -27,7 +27,7 @@ This delivery implements the MVP for Adaptive Shield weekly reporting:
 - `as/src/as_weekly_report/snow_client.py`
 
 ### Notebook
-- `as/notebooks/as_weekly_report.ipynb` (11 cells)
+- `as/notebooks/as_weekly_report.ipynb` (12 cells)
 
 ### Tests
 - `as/tests/conftest.py`
@@ -63,6 +63,17 @@ Files:
 - `AS_Weekly_Summary_{timestamp}.csv`
 - `AS_Weekly_Entities_{timestamp}.csv`
 - `AS_Weekly_Errors_{timestamp}.csv`
+
+## UI behavior (Configuration Drifts)
+
+The notebook includes a dedicated UI cell for drift review:
+
+1. Auto-group same integration + security check into one merged card.
+2. Detect and mark flip-flops (failed/passed status transitions) with a badge.
+3. Group by current status with failed groups first.
+4. Keep passed groups folded by default.
+5. Keep affected entities folded by default per check card, with expand/collapse support.
+6. Keep event history folded per merged check card.
 
 ## Validation completed
 
