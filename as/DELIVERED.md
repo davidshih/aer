@@ -2,38 +2,40 @@
 
 ## What was delivered
 
-This delivery implements the MVP for Adaptive Shield weekly reporting:
+This delivery now includes the original MVP plus ServiceNow incident mapping enhancement:
 
 1. Pull alerts in a lookback window (default: 3 days).
 2. Filter only `configuration_drift` and `integration_failure`.
 3. Enrich alerts with security check details.
 4. Expand affected entities for non-global checks.
 5. Export report outputs to XLSX and CSV.
-6. Keep ServiceNow integration as a stub with ready columns.
+6. Collect ServiceNow incidents via Selenium (`short description` contains `AdaptiveShield`).
+7. Map incidents to `SaaS | Alias | Check` and merge ticket status back into summary.
+8. Provide an enhanced drift UI with ServiceNow status badges and stale-update hints.
 
 ## Implemented files
 
 ### Project configuration
-- `as/.env.example`
-- `as/.gitignore`
-- `as/requirements.txt`
-- `as/PLAN_adaptive_shield_weekly_report_v1.md`
+- `/Users/davidshih/projects/work/aer/as/.env.example`
+- `/Users/davidshih/projects/work/aer/as/.gitignore`
+- `/Users/davidshih/projects/work/aer/as/requirements.txt`
+- `/Users/davidshih/projects/work/aer/as/PLAN_adaptive_shield_weekly_report_v1.md`
 
 ### Python package
-- `as/src/as_weekly_report/__init__.py`
-- `as/src/as_weekly_report/as_client.py`
-- `as/src/as_weekly_report/transform.py`
-- `as/src/as_weekly_report/exporter.py`
-- `as/src/as_weekly_report/snow_client.py`
+- `/Users/davidshih/projects/work/aer/as/src/as_weekly_report/__init__.py`
+- `/Users/davidshih/projects/work/aer/as/src/as_weekly_report/as_client.py`
+- `/Users/davidshih/projects/work/aer/as/src/as_weekly_report/transform.py`
+- `/Users/davidshih/projects/work/aer/as/src/as_weekly_report/exporter.py`
+- `/Users/davidshih/projects/work/aer/as/src/as_weekly_report/snow_client.py`
 
 ### Notebook
-- `as/notebooks/as_weekly_report.ipynb` (12 cells)
+- `/Users/davidshih/projects/work/aer/as/notebooks/as_weekly_report.ipynb` (13 cells)
 
 ### Tests
-- `as/tests/conftest.py`
-- `as/tests/test_as_client.py`
-- `as/tests/test_transform.py`
-- `as/tests/test_exporter.py`
+- `/Users/davidshih/projects/work/aer/as/tests/conftest.py`
+- `/Users/davidshih/projects/work/aer/as/tests/test_as_client.py`
+- `/Users/davidshih/projects/work/aer/as/tests/test_transform.py`
+- `/Users/davidshih/projects/work/aer/as/tests/test_exporter.py`
 
 ## Notebook inputs
 
@@ -47,6 +49,17 @@ Environment variables used by the notebook:
 - `EXPORT_XLSX` (default: `true`)
 - `EXPORT_CSV` (default: `true`)
 - `SNOW_ENABLED` (default: `false`)
+- `SNOW_BASE_URL`
+- `SNOW_USERNAME`
+- `SNOW_PASSWORD`
+- `SNOW_COOKIE_PATH`
+- `SNOW_HEADLESS` (default: `true`)
+- `SNOW_USER_DATA_DIR`
+- `SNOW_CHROMEDRIVER_PATH`
+- `SNOW_LOGIN_TIMEOUT_SECONDS` (default: `20`)
+- `SNOW_MAX_INCIDENTS` (default: `200`)
+- `SNOW_FETCH_DETAIL_NOTES` (default: `true`)
+- `SNOW_INCIDENT_QUERY` (default: `short_descriptionLIKEAdaptiveShield`)
 - `RATE_LIMIT_PER_MINUTE` (default: `90`)
 - `REQUEST_TIMEOUT_SECONDS` (default: `30`)
 - `MAX_RETRIES` (default: `3`)
@@ -55,7 +68,7 @@ Environment variables used by the notebook:
 
 Generated under:
 
-- `as/output/YYYY-MM-DD/`
+- `/Users/davidshih/projects/work/aer/as/output/YYYY-MM-DD/`
 
 Files:
 
@@ -63,32 +76,42 @@ Files:
 - `AS_Weekly_Summary_{timestamp}.csv`
 - `AS_Weekly_Entities_{timestamp}.csv`
 - `AS_Weekly_Errors_{timestamp}.csv`
+- `AS_Weekly_ServiceNow_Tickets_{timestamp}.csv`
 
-## UI behavior (Configuration Drifts)
+## UI behavior
 
-The notebook includes a dedicated UI cell for drift review:
-
+### Cell 8 (baseline Configuration Drifts)
 1. Auto-group same integration + security check into one merged card.
 2. Display grouped checks in a timeline infographic with latest records on top.
 3. Detect and mark flip-flops (failed/passed status transitions) with a badge.
 4. Group by current status with failed groups first.
 5. Keep passed groups folded by default.
-6. Include `saas name`, `integration alias`, and `security check name` in the card summary.
-7. Keep check details and remediation content folded by default.
-8. Keep affected entities folded by default per check card, with expand/collapse support.
-9. Show full entity-level details (extra context, usage, raw payload) from `GET .../security_checks/{id}/affected`, each in nested folded sections.
-10. Keep event history folded per merged check card.
+6. Keep details/remediation/entities/history foldable.
+
+### Cell 10 (enhanced with ServiceNow)
+1. Re-render drift timeline with ServiceNow context.
+2. Add `SN: none / open N / closed N` badge in card header.
+3. Add stale hint (`last update Nd ago`) for open incidents.
+4. Add folded ServiceNow incidents table:
+   - ticket number
+   - opened datetime
+   - state
+   - assigned to
+   - last update datetime
+   - days ago
+   - note source
+   - last note (truncated)
 
 ## Validation completed
 
-1. Python compile check passed.
-2. Unit tests passed:
-   - `12 passed`
+1. Notebook code cells AST parse check passed.
+2. Cell sequence updated to 13 cells with new ServiceNow collection and enhanced UI cell.
 
 ## Quick run
 
 1. Create `.env` from `.env.example` and set `AS_API_KEY`.
-2. Install dependencies:
-   - `pip install -r as/requirements.txt`
-3. Open and run:
-   - `as/notebooks/as_weekly_report.ipynb`
+2. If using ServiceNow enhancement, set `SNOW_ENABLED=true` and fill ServiceNow env vars.
+3. Install dependencies:
+   - `pip install -r /Users/davidshih/projects/work/aer/as/requirements.txt`
+4. Open and run:
+   - `/Users/davidshih/projects/work/aer/as/notebooks/as_weekly_report.ipynb`

@@ -1,4 +1,5 @@
 .env
+.snow_cookies.pkl
 .ipynb_checkpoints/
 __pycache__/
 *.pyc

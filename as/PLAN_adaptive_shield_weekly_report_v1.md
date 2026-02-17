@@ -1,7 +1,7 @@
-# Adaptive Shield 週報實作參考（v1）
+# Adaptive Shield 週報實作參考（v2, with ServiceNow Mapping）
 
 ## 1. 目標
-MVP 只做 Adaptive Shield 主流程：
+主流程維持：
 
 1. 拉取過去 `x` 天（預設 3 天）alerts。
 2. 過濾 `configuration_drift` 與 `integration_failure`。
@@ -9,9 +9,14 @@ MVP 只做 Adaptive Shield 主流程：
 4. 展開 affected entities。
 5. 匯出 XLSX + CSV。
 
-ServiceNow 先保留 stub 欄位，不做 Selenium 實抓。
+新增 ServiceNow enhancement：
 
-## 2. API 定稿
+1. 用 Selenium 自動抓 incidents（`short description` 包含 `AdaptiveShield`，opened date 在 lookback 內）。
+2. 將 incidents 映射到 `SaaS | Alias | Check`。
+3. 回填票務欄位到 summary。
+4. 追加一個含票務狀態的 Drift UI（保留原本 Cell 8 UI）。
+
+## 2. API 定稿（Adaptive Shield）
 1. Base URL: `https://api.adaptive-shield.com`
 2. Authorization Header: `Authorization: Token {api_key}`
 3. 核心端點：
@@ -41,12 +46,23 @@ Input:
 - `EXPORT_XLSX`
 - `EXPORT_CSV`
 - `SNOW_ENABLED`
+- `SNOW_BASE_URL`
+- `SNOW_USERNAME`
+- `SNOW_PASSWORD`
+- `SNOW_COOKIE_PATH`
+- `SNOW_HEADLESS`
+- `SNOW_USER_DATA_DIR`
+- `SNOW_CHROMEDRIVER_PATH`
+- `SNOW_LOGIN_TIMEOUT_SECONDS`
+- `SNOW_MAX_INCIDENTS`
+- `SNOW_FETCH_DETAIL_NOTES`
+- `SNOW_INCIDENT_QUERY`
 - `RATE_LIMIT_PER_MINUTE`
 - `REQUEST_TIMEOUT_SECONDS`
 - `MAX_RETRIES`
 
 Output:
-- Embedded runtime functions (API client, transform, UI renderer, exporter, SNOW stub)
+- Embedded runtime functions (AS client, transform, exporter, drift UI, ServiceNow collection/mapping)
 - `config` dictionary
 - `RUN_TS` timestamp (UTC)
 - output directory path
@@ -85,10 +101,6 @@ Input:
 Output:
 - `entities_df` (one row per entity)
 - `affected_resolve_log_df` (`global` / `fetched` / `unresolved`)
-- Full entity details from `GET /security_checks/{securityCheckId}/affected` mapped into:
-  - `entity_extra_context_json`
-  - `entity_usage_json`
-  - `entity_raw_json`
 
 ### Cell 7 - Summary table
 Input:
@@ -100,110 +112,97 @@ Input:
 Output:
 - `summary_df`
 
-### Cell 8 - Configuration drift timeline UI
+### Cell 8 - Configuration drift timeline UI (baseline)
 Input:
 - `summary_df` (drift subset)
 - `entities_df`
 
 Output:
-- Infographic timeline view (latest on top)
-- Grouped cards by `integration + security check`
-- Folded sections for details/remediation/entity payload/history
+- Baseline infographic timeline view
 
-### Cell 9 - ServiceNow stub
+### Cell 9 - ServiceNow Collection + Mapping
 Input:
-- `SNOW_ENABLED`
+- `summary_df`
 - `LOOKBACK_DAYS`
+- `config` (SNOW settings)
 
 Output:
-- `snow_df` (stub dataframe)
-- `summary_with_snow_df` (left-merged)
+- `snow_row_df`（alert 粒度）
+- `snow_incidents_raw_df`（抓回原始 incident）
+- `snow_ticket_details_df`（check-key 粒度）
+- `summary_with_snow_df`
 
-### Cell 10 - Quality checks
+### Cell 10 - Configuration drift timeline UI (enhanced with ServiceNow)
+Input:
+- `summary_with_snow_df` (drift subset)
+- `entities_df`
+- `snow_ticket_details_df`
+
+Output:
+- Enhanced timeline with ServiceNow badge, open ticket count, stale days hint, folded ticket list
+
+### Cell 11 - Quality checks
 Input:
 - `summary_with_snow_df`
 - `entities_df`
+- `snow_incidents_raw_df`
+- `snow_ticket_details_df`
 - `pipeline_errors`
 
 Output:
 - `quality_report_df`
 - `errors_df`
 
-### Cell 11 - Export
+### Cell 12 - Export
 Input:
 - `summary_with_snow_df`
 - `entities_df`
 - `errors_df`
-- export switches
+- `snow_ticket_details_df`
 
 Output files (under `output/YYYY-MM-DD/`):
 - `AS_Weekly_Report_{timestamp}.xlsx`
 - `AS_Weekly_Summary_{timestamp}.csv`
 - `AS_Weekly_Entities_{timestamp}.csv`
 - `AS_Weekly_Errors_{timestamp}.csv`
+- `AS_Weekly_ServiceNow_Tickets_{timestamp}.csv`
 
-## 4. 固定輸出欄位
-`summary_df`:
-- `change_datetime`
-- `security_check_name`
-- `security_check_details`
-- `remediation_steps`
-- `impact_level`
-- `current_status`
-- `affected_entities_count`
-- `affected_scope`
-- `affected_entities_detail`
-- `account_id`
-- `account_name`
-- `integration_id`
-- `integration_name`
-- `integration_alias`
-- `saas_name`
-- `security_check_id`
-- `alert_id`
-- `alert_type`
-- `source`
-- `source_id`
-- `is_archived`
+## 4. 票務欄位（summary 合併後）
 - `ticket_number`
-- `ticket_owner`
-- `ticket_status`
+- `ticket_opened_datetime`
+- `ticket_state`
+- `ticket_assigned_to`
+- `ticket_owner` (compat alias)
+- `ticket_status` (compat alias)
 - `ticket_last_update_datetime`
+- `ticket_last_update_days_ago`
+- `ticket_last_note_source`
 - `ticket_last_update_content`
-- `extracted_at_utc`
+- `ticket_is_closed`
+- `ticket_match_key`
+- `ticket_count_for_check`
+- `open_ticket_count_for_check`
 
-`entities_df`:
-- `account_id`
-- `security_check_id`
-- `alert_id`
-- `entity_type`
-- `entity_name`
-- `entity_dismissed`
-- `entity_dismissed_reason`
-- `entity_dismiss_expiration_date`
-- `entity_extra_context_json`
-- `entity_usage_json`
-- `entity_raw_json`
+## 5. ServiceNow Mapping 規則
+1. Query 先以 `short_description CONTAINS AdaptiveShield` 抓清單。
+2. opened date 為時間窗基準。
+3. `short description` 解析 key：
+   - 優先 structured（`AdaptiveShield ... SaaS | Alias | Check`）
+   - fallback 為 normalized contains（三段都命中才算 match）
+4. 同 check-key 多票策略：
+   - 主表/卡片取 latest ticket
+   - 折疊區列出 all tickets
 
-## 7. UI 驗收（Configuration Drift）
-1. 同 integration + security check 需合併為單一卡片。
-2. 以目前 status 分群，`failed` 先顯示，`passed` 預設收合。
-3. 每個 status 群組內採時間軸呈現，最新 change 在上方。
-4. 卡片標題需同時顯示 `SaaS name`、`integration alias`、`security check name`。
-5. `details` 與 `remediation` 預設為可折疊區塊。
-6. `affected entities` 預設折疊，且可展開 entity-level 全細節（extra context/usage/raw payload）。
-7. flip-flop（failed/passed 來回）需標記 badge 並保留折疊歷史。
+## 6. 錯誤處理
+1. `SNOW_ENABLED=false`：直接回傳空 schema，不中斷 AS 流程。
+2. Selenium 初始化失敗：記錄 `pipeline_errors`，SNOW 輸出為空。
+3. 單票 detail 抓取失敗：該票 note 欄位留空，流程繼續。
+4. 時間欄位不可解析：該票 skip 或 days_ago 留空並記錄錯誤。
 
-## 5. 錯誤處理
-1. 401 -> fail fast.
-2. 429 -> retry with `Retry-After` else exponential backoff.
-3. 5xx -> retry up to max retries.
-4. 單一 alert/check/entity 失敗 -> 記錄到 `errors_df`，不中斷整體流程。
-5. 空資料 -> 仍輸出空 schema 檔案。
-
-## 6. 測試驗收
-1. 分頁：`next_page_uri` 與 `meta.pagination` 都可完整拉回。
-2. 型別過濾：僅 `configuration_drift` + `integration_failure`。
-3. global 判定：`is_global=true` -> `affected_scope=global`。
-4. 匯出：同次執行輸出 1 xlsx + 3 csv。
-5. 容錯：429/5xx 可恢復；401 直接終止。
+## 7. UI 驗收（Enhanced）
+1. 保留原 Cell 8 基礎 Drift UI。
+2. Cell 10 提供 SNOW enhanced UI。
+3. 卡片顯示：`SaaS | Alias | Check` + status badge + `SN: none/open/closed`。
+4. open ticket 有 stale hint（`last update N d ago`）。
+5. 票務明細折疊區顯示：number/opened/state/assigned/last update/days/note source/last note。
+6. Timeline 與 status grouping 規則維持不變（failed first, passed folded, flip-flop badge）。
