@@ -1,0 +1,32 @@
+
+  # 診斷 cell — 在 Cell 3 完成後執行
+  print("=== SNOW CONFIG ===")
+  print(f"snow_enabled:          {config.get('snow_enabled')}")
+  print(f"snow_headless:         {config.get('snow_headless')}")
+  print(f"snow_interactive_login:{config.get('snow_interactive_login')}")
+  print(f"snow_base_url:         {config.get('snow_base_url', '(empty)')[:40]}")
+
+  print("\n=== PIPELINE ERRORS (servicenow stage) ===")
+  snow_errors = [e for e in pipeline_errors if e.get('stage') == 'servicenow']
+  for e in snow_errors:
+      print(" ", e)
+
+  print("\n=== SELENIUM TEST ===")
+  try:
+      from selenium import webdriver
+      from selenium.webdriver.chrome.options import Options
+      opts = Options()
+      # 強制非 headless
+      opts.add_argument("--no-sandbox")
+      try:
+          from webdriver_manager.chrome import ChromeDriverManager
+          from selenium.webdriver.chrome.service import Service
+          svc = Service(ChromeDriverManager().install())
+          d = webdriver.Chrome(service=svc, options=opts)
+      except Exception as e1:
+          print(f"  webdriver_manager failed: {e1}")
+          d = webdriver.Chrome(options=opts)
+      print(f"  Chrome opened OK: {d.title}")
+      d.quit()
+  except Exception as e:
+      print(f"  FAILED: {e}")
