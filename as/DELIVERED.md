@@ -115,3 +115,44 @@ Files:
    - `pip install -r /Users/davidshih/projects/work/aer/as/requirements.txt`
 4. Open and run:
    - `/Users/davidshih/projects/work/aer/as/notebooks/as_weekly_report.ipynb`
+
+---
+
+## Integration overview delivery (current)
+
+This delivery adds a second notebook and shared helpers for integration-first reporting:
+
+1. New notebook: `/Users/davidshih/projects/work/aer/as/notebooks/as_integrations_overview.ipynb`.
+2. Fetches all integrations with pagination.
+3. Builds strict full-check inventory per account:
+   - tries account-level checks endpoint,
+   - tries integration-level checks endpoint,
+   - fails fast when no valid endpoint can provide strict inventory.
+4. Expands failed check affected entities (non-global checks only).
+5. Persists local history snapshots in partitioned parquet layout (daily).
+6. Reads local snapshots to render collapsible check history in UI.
+7. Writes all outputs under:
+   - `/Users/davidshih/projects/work/aer/as/output/YYYY-MM-DD/Adaptive_Shield/log`
+   - `/Users/davidshih/projects/work/aer/as/output/YYYY-MM-DD/Adaptive_Shield/overview`
+   - `/Users/davidshih/projects/work/aer/as/output/YYYY-MM-DD/Adaptive_Shield/history`
+8. Keeps ServiceNow as empty stub by default.
+
+### New/updated files
+
+- `/Users/davidshih/projects/work/aer/as/docs/design/as_integrations_overview_design_v1.md`
+- `/Users/davidshih/projects/work/aer/as/docs/design/as_history_snapshot_partition_v1.md`
+- `/Users/davidshih/projects/work/aer/as/src/as_weekly_report/integration_overview.py`
+- `/Users/davidshih/projects/work/aer/as/src/as_weekly_report/as_client.py` (adds checks list APIs)
+- `/Users/davidshih/projects/work/aer/as/src/as_weekly_report/__init__.py` (exports new helpers)
+- `/Users/davidshih/projects/work/aer/as/tests/test_integration_overview.py`
+- `/Users/davidshih/projects/work/aer/as/tests/test_notebook_contract.py`
+- `/Users/davidshih/projects/work/aer/as/requirements.txt` (`pyarrow` added)
+- `/Users/davidshih/projects/work/aer/as/.env.example` (history/snapshot/output timezone variables added)
+
+### New environment variables
+
+- `OUTPUT_TIMEZONE` (default: `America/New_York`)
+- `SNAPSHOT_GRANULARITY` (default: `daily`)
+- `HISTORY_CACHE_ENABLED` (default: `true`)
+- `HISTORY_UI_LOOKBACK_DAYS` (default: `180`)
+- `INTEGRATION_UI_HISTORY_ENABLED` (default: `true`)

@@ -117,6 +117,28 @@ class AdaptiveShieldClient:
         records = self._paginate("GET", path)
         return [item for item in records if isinstance(item, dict)]
 
+    def get_security_checks_by_account(
+        self,
+        account_id: str,
+    ) -> list[dict[str, Any]]:
+        """List security checks for an account."""
+        path = f"/api/v1/accounts/{account_id}/security_checks"
+        records = self._paginate("GET", path)
+        return [item for item in records if isinstance(item, dict)]
+
+    def get_security_checks_by_integration(
+        self,
+        account_id: str,
+        integration_id: str,
+    ) -> list[dict[str, Any]]:
+        """List security checks for a specific integration."""
+        path = (
+            f"/api/v1/accounts/{account_id}/integrations/"
+            f"{integration_id}/security_checks"
+        )
+        records = self._paginate("GET", path)
+        return [item for item in records if isinstance(item, dict)]
+
     def _paginate(
         self,
         method: str,
