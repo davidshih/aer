@@ -31,7 +31,7 @@ ServiceNow 先保留 stub 欄位，不做 Selenium 實抓。
 Input: None  
 Output: Project scope and version
 
-### Cell 1 - Imports + config loader
+### Cell 1 - Standalone initialization
 Input:
 - `AS_API_KEY`
 - `AS_BASE_URL`
@@ -46,6 +46,7 @@ Input:
 - `MAX_RETRIES`
 
 Output:
+- Embedded runtime functions (API client, transform, UI renderer, exporter, SNOW stub)
 - `config` dictionary
 - `RUN_TS` timestamp (UTC)
 - output directory path
@@ -84,6 +85,10 @@ Input:
 Output:
 - `entities_df` (one row per entity)
 - `affected_resolve_log_df` (`global` / `fetched` / `unresolved`)
+- Full entity details from `GET /security_checks/{securityCheckId}/affected` mapped into:
+  - `entity_extra_context_json`
+  - `entity_usage_json`
+  - `entity_raw_json`
 
 ### Cell 7 - Summary table
 Input:
@@ -95,7 +100,17 @@ Input:
 Output:
 - `summary_df`
 
-### Cell 8 - ServiceNow stub
+### Cell 8 - Configuration drift timeline UI
+Input:
+- `summary_df` (drift subset)
+- `entities_df`
+
+Output:
+- Infographic timeline view (latest on top)
+- Grouped cards by `integration + security check`
+- Folded sections for details/remediation/entity payload/history
+
+### Cell 9 - ServiceNow stub
 Input:
 - `SNOW_ENABLED`
 - `LOOKBACK_DAYS`
@@ -104,7 +119,7 @@ Output:
 - `snow_df` (stub dataframe)
 - `summary_with_snow_df` (left-merged)
 
-### Cell 9 - Quality checks
+### Cell 10 - Quality checks
 Input:
 - `summary_with_snow_df`
 - `entities_df`
@@ -114,7 +129,7 @@ Output:
 - `quality_report_df`
 - `errors_df`
 
-### Cell 10 - Export
+### Cell 11 - Export
 Input:
 - `summary_with_snow_df`
 - `entities_df`
@@ -143,6 +158,7 @@ Output files (under `output/YYYY-MM-DD/`):
 - `integration_id`
 - `integration_name`
 - `integration_alias`
+- `saas_name`
 - `security_check_id`
 - `alert_id`
 - `alert_type`
@@ -168,6 +184,15 @@ Output files (under `output/YYYY-MM-DD/`):
 - `entity_extra_context_json`
 - `entity_usage_json`
 - `entity_raw_json`
+
+## 7. UI 驗收（Configuration Drift）
+1. 同 integration + security check 需合併為單一卡片。
+2. 以目前 status 分群，`failed` 先顯示，`passed` 預設收合。
+3. 每個 status 群組內採時間軸呈現，最新 change 在上方。
+4. 卡片標題需同時顯示 `SaaS name`、`integration alias`、`security check name`。
+5. `details` 與 `remediation` 預設為可折疊區塊。
+6. `affected entities` 預設折疊，且可展開 entity-level 全細節（extra context/usage/raw payload）。
+7. flip-flop（failed/passed 來回）需標記 badge 並保留折疊歷史。
 
 ## 5. 錯誤處理
 1. 401 -> fail fast.

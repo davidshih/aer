@@ -69,11 +69,15 @@ Files:
 The notebook includes a dedicated UI cell for drift review:
 
 1. Auto-group same integration + security check into one merged card.
-2. Detect and mark flip-flops (failed/passed status transitions) with a badge.
-3. Group by current status with failed groups first.
-4. Keep passed groups folded by default.
-5. Keep affected entities folded by default per check card, with expand/collapse support.
-6. Keep event history folded per merged check card.
+2. Display grouped checks in a timeline infographic with latest records on top.
+3. Detect and mark flip-flops (failed/passed status transitions) with a badge.
+4. Group by current status with failed groups first.
+5. Keep passed groups folded by default.
+6. Include `saas name`, `integration alias`, and `security check name` in the card summary.
+7. Keep check details and remediation content folded by default.
+8. Keep affected entities folded by default per check card, with expand/collapse support.
+9. Show full entity-level details (extra context, usage, raw payload) from `GET .../security_checks/{id}/affected`, each in nested folded sections.
+10. Keep event history folded per merged check card.
 
 ## Validation completed
 
