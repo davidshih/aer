@@ -1,18 +1,42 @@
+  # 診斷 cell — 在 Cell 4 完成後立即執行
+  from selenium.webdriver.common.by import By
+  import re
 
-  import os
-  from pathlib import Path
+  d = driver  # driver 是 _collect_snow_incidents 裡建的，但已 quit。
+  # 如果 driver 已關，先重建一個供診斷用：
+  if 'driver' not in dir() or driver is None:
+      config["snow_keep_browser_open"] = True
+      d = _build_snow_driver(config)
+      d.get(list_url)
+      import time; time.sleep(8)
 
-  print("ROOT_DIR:", ROOT_DIR)
-  print(".env exists:", (ROOT_DIR / ".env").exists())
-  print(".env path:", ROOT_DIR / ".env")
+  print("=== URL & Title ===")
+  print("URL  :", d.current_url)
+  print("Title:", d.title)
+  print("Tabs :", len(d.window_handles))
 
-  # 讀 .env 內容看是否真的有 SNOW_BASE_URL
-  env_file = ROOT_DIR / ".env"
-  if env_file.exists():
-      for line in env_file.read_text().splitlines():
-          if "SNOW" in line.upper():
-              print(" ", line)
-  else:
-      print("  .env FILE NOT FOUND at that path!")
+  print("\n=== All <table> elements ===")
+  for t in d.find_elements(By.CSS_SELECTOR, "table")[:15]:
+      print(f"  class={t.get_attribute('class')!r}  id={t.get_attribute('id')!r}")
 
-  print("\nos.getenv SNOW_BASE_URL:", repr(os.getenv("SNOW_BASE_URL")))
+  print("\n=== All <iframe> elements ===")
+  for f in d.find_elements(By.CSS_SELECTOR, "iframe")[:10]:
+      print(f"  id={f.get_attribute('id')!r}  name={f.get_attribute('name')!r}")
+
+  print("\n=== Incident links (any href with incident.do) ===")
+  links = d.find_elements(By.CSS_SELECTOR, "a[href*='incident.do']")
+  print(f"  count: {len(links)}")
+  for l in links[:3]:
+      print(f"  href={l.get_attribute('href')!r[:100]}")
+
+  print("\n=== INC numbers in page source ===")
+  incs = set(re.findall(r'INC\d{5,}', d.page_source))
+  print(f"  {sorted(incs)[:10]}")
+
+  print("\n=== <tr> elements with data attributes ===")
+  trs = d.find_elements(By.CSS_SELECTOR, "tr[data-record_class], tr[sys_id], tr[data-id]")
+  print(f"  count: {len(trs)}")
+  if trs:
+      attrs = ['class','data-record_class','sys_id','data-id']
+      for a in attrs:
+          print(f"  first tr {a}={trs[0].get_attribute(a)!r}")
