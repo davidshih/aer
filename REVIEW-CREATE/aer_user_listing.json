@@ -2,40 +2,43 @@
   "cells": [
     {
       "cell_type": "markdown",
-      "metadata": {},
+      "metadata": {
+        "collapsed": true,
+        "jupyter": {
+          "source_hidden": true
+        }
+      },
       "source": [
-        "# 🛡️ AER - Smart Access Review Generator (v7.0 Three-Stage)\n",
+        "### AER Tool with Stages\n",
         "\n",
-        "**Major Refactoring in v7.0:**\n",
+        "**Stages:**\n",
         "- ✅ **Stage 1 (Cell 1)**: AD Authentication & User Download\n",
+        "- ✅ **Stage 1.5 (Cell 1.5)**: Org Tree Builder for Dept Heads\n",
         "- ✅ **Stage 2 (Cell 2)**: Email/User Validation & AD Status Check\n",
         "- ✅ **Stage 3 (Cell 3)**: Reviewer Assignment & Manual Override\n",
-        "- ✅ **Stage 1.5 (Cell 2)**: Org Tree Builder for Dept Heads\n",
         "\n",
-        "**New Features:**\n",
+        "**Key Features:**\n",
         "1. ✅ **Separated Workflow**: Each stage is independent and saves checkpoint files\n",
         "2. ✅ **24-Month Activity**: Attempts to fetch sign-in activity (falls back gracefully)\n",
         "3. ✅ **Manager Info**: Captures manager for every user to build org tree\n",
         "4. ✅ **Org Tree UI**: Select dept heads & generate mapping file\n",
-        "3. ✅ **AD Status Column**: Clear visibility of Active/Inactive/Not Found\n",
-        "4. ✅ **Email-First Logic**: Email matches require manual approval with pre-fill\n",
-        "5. ✅ **Backward Compatible**: Works with legacy files if Cell 1-2 are skipped\n",
-        "\n",
-        "**Previous Features (v6.5):**\n",
-        "- Enhanced Reviewer Mapping\n",
-        "- Missing Email Handler with Fuzzy Matching\n",
-        "- Smart Column Detection\n",
-        "- Branch Support\n",
-        "- Visual Enhancements\n"
+        "5. ✅ **AD Status Column**: Clear visibility of Active/Inactive/Not Found\n",
+        "6. ✅ **Email-First Logic**: Email matches require manual approval with pre-fill\n",
+        "7. ✅ **Backward Compatible**: Works with legacy files if some stages are skipped\n"
       ]
     },
     {
       "cell_type": "code",
       "execution_count": null,
-      "metadata": {},
+      "metadata": {
+        "collapsed": true,
+        "jupyter": {
+          "source_hidden": true
+        }
+      },
       "outputs": [],
       "source": [
-        "# === CELL 1: AD Authentication & User Download (v7.1 Stage 1) ===\n",
+        "# === CELL 1: AD Authentication & User Download ===\n",
         "import os, sys, logging, re, requests, json, glob\n",
         "import pandas as pd\n",
         "import ipywidgets as widgets\n",
@@ -523,10 +526,15 @@
     {
       "cell_type": "code",
       "execution_count": null,
-      "metadata": {},
+      "metadata": {
+        "collapsed": true,
+        "jupyter": {
+          "source_hidden": true
+        }
+      },
       "outputs": [],
       "source": [
-        "# === CELL 1.5: Org Tree Builder (v7.4 Stage 1.5) ===\n",
+        "# === CELL 1.5: Org Tree Builder for Dept Heads ===\n",
         "import os, glob, logging, io, math, sys\n",
         "import pandas as pd\n",
         "import ipywidgets as widgets\n",
@@ -1119,10 +1127,15 @@
     {
       "cell_type": "code",
       "execution_count": null,
-      "metadata": {},
+      "metadata": {
+        "collapsed": true,
+        "jupyter": {
+          "source_hidden": true
+        }
+      },
       "outputs": [],
       "source": [
-        "#!/usr/bin/env python3\n",
+        "# === CELL 2: Email/User Validation & AD Status Check ===\n",
         "\"\"\"\n",
         "Stage 2: Email/User Validation with Enhanced UI (Jupyter Cell) v8.2\n",
         "\n",
@@ -2142,10 +2155,15 @@
     {
       "cell_type": "code",
       "execution_count": null,
-      "metadata": {},
+      "metadata": {
+        "collapsed": true,
+        "jupyter": {
+          "source_hidden": true
+        }
+      },
       "outputs": [],
       "source": [
-        "#!/usr/bin/env python3\n",
+        "# === CELL 3: Reviewer Assignment & Manual Override ===\n",
         "\"\"\"\n",
         "Stage 3: Reviewer Assignment with Complete Columns (v3.0 FINAL)\n",
         "\n",
