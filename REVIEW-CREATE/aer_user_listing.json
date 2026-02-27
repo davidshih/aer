@@ -6105,7 +6105,7 @@
         "\n",
         "        url = (\n",
         "\n",
-        "            f\"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/{quote(clean_parent, safe='/')}\"\n",
+        "            f\"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/{quote(clean_parent, safe='/')}:\"\n",
         "\n",
         "            \"/children?$top=200&$select=id,name,webUrl,folder\"\n",
         "\n",
