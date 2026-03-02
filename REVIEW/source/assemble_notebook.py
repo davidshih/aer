@@ -6,7 +6,6 @@ import os
 import sys
 
 CELL_FILES = [
-    ("cell_0_common.py", "code", "Cell 0: Common Library & Configuration"),
     ("cell_1_ad_auth.py", "code", "Cell 1: Stage 1 — AD Authentication & User Download"),
     ("cell_15_org_tree.py", "code", "Cell 1.5: Stage 1.5 — Org Tree Builder"),
     ("cell_2_validation.py", "code", "Cell 2: Stage 2 — Email/User Validation"),
@@ -16,6 +15,28 @@ CELL_FILES = [
     ("cell_6_report.py", "code", "Cell 6: Stage 6 — Report Scanner & Dashboard"),
     ("cell_7_email.py", "code", "Cell 7: Stage 7 — Email Notification Center"),
 ]
+
+CELL0_BOOTSTRAP = """# === CELL 0: Common Library & Configuration ===
+# Thin bootstrap that loads the shared runtime module.
+
+from pathlib import Path
+import sys
+
+_repo_root = Path.cwd().resolve()
+_source_dir = _repo_root / "source"
+if not _source_dir.exists():
+    raise RuntimeError("Expected 'source/' next to the notebook. Open the notebook from the REVIEW workspace root.")
+if str(_repo_root) not in sys.path:
+    sys.path.insert(0, str(_repo_root))
+
+from source import cell_0_common as aer_common
+
+app_runtime = aer_common.build_runtime()
+aer_common._inject_notebook_globals(globals(), app_runtime)
+
+for _line in aer_common.runtime_status_lines(app_runtime):
+    print(_line)
+"""
 
 MARKDOWN_HEADER = """# AER — Access Entitlement Review Suite v5.0
 
@@ -102,7 +123,7 @@ def make_markdown_cell(source):
     }
 
 def main():
-    cells_dir = "/tmp/aer_cells"
+    cells_dir = os.path.dirname(os.path.abspath(__file__))
     output_path = sys.argv[1] if len(sys.argv) > 1 else "/Users/davidshih/projects/work/aer/REVIEW/aer_0302.json"
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -112,7 +133,11 @@ def main():
     # Add markdown header
     cells.append(make_markdown_cell(MARKDOWN_HEADER.strip()))
 
-    # Add code cells
+    # Add bootstrap cell
+    cells.append(make_code_cell(CELL0_BOOTSTRAP.strip()))
+    print("  Added: bootstrap cell_0_common (thin runtime loader)")
+
+    # Add stage code cells
     for filename, cell_type, title in CELL_FILES:
         filepath = os.path.join(cells_dir, filename)
         if not os.path.exists(filepath):

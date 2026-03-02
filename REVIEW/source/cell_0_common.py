@@ -15,6 +15,7 @@ import html
 import logging
 import platform
 import hashlib
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from urllib.parse import quote, urlparse, unquote
 from enum import Enum
@@ -70,38 +71,60 @@ except ImportError:
 
 
 # ============================================
-# CONFIG & PATHS
+# RUNTIME CONFIGURATION
 # ============================================
 
-load_dotenv(override=True)
+@dataclass(frozen=True)
+class AppConfig:
+    tenant_id: str
+    client_id: str
+    sharepoint_host: str
+    site_name: str
+    sender_email: str
+    review_year: str
+    root_person: str
+    org_depth: int
+    fuzzy_threshold: int
+    base_path: str
+    email_template_footer: str
 
-TENANT_ID = os.getenv("AZURE_TENANT_ID", "").strip()
-CLIENT_ID = os.getenv("AZURE_CLIENT_ID", "").strip()
-SHAREPOINT_HOST = os.getenv("SHAREPOINT_HOST", "").strip()
-SITE_NAME = os.getenv("SITE_NAME", "aer").strip()
-SENDER_EMAIL = os.getenv("SENDER_EMAIL", "").strip()
 
-# New config parameters
-AER_REVIEW_YEAR = os.getenv("AER_REVIEW_YEAR", str(datetime.now().year)).strip()
-AER_ROOT_PERSON = os.getenv("AER_ROOT_PERSON", "Steven Bush").strip()
-AER_ORG_DEPTH = int(os.getenv("AER_ORG_DEPTH", "3").strip())
-AER_FUZZY_THRESHOLD = int(os.getenv("AER_FUZZY_THRESHOLD", "89").strip())
-BASE_PATH = os.getenv("BASE_PATH", "").strip()
-if not BASE_PATH:
-    BASE_PATH = os.getenv("APP_NAME", f"{AER_REVIEW_YEAR} Entitlement Review").strip()
-AER_EMAIL_TEMPLATE_FOOTER = os.getenv(
-    "AER_EMAIL_TEMPLATE_FOOTER",
-    "Sincerely,\nInformation Security Team"
-).strip().replace("\\n", "\n")
+@dataclass(frozen=True)
+class RuntimePaths:
+    today_str: str
+    hour_str: str
+    input_dir: str
+    input_ad_cache_dir: str
+    input_mapping_dir: str
+    output_base_dir: str
+    output_log_dir: str
+    output_ad_cache_dir: str
+    output_orgchart_dir: str
+    stage2_dir: str
+    stage3_dir: str
+    stage4_dir: str
+    report_dir: str
+    cache_dir: str
+    checkpoint_dir: str
+    log_file: str
 
-TODAY_STR = datetime.now().strftime("%Y-%m-%d")
-HOUR_STR = datetime.now().strftime("%H")
 
-# Path structure
+@dataclass(frozen=True)
+class AppRuntime:
+    config: AppConfig
+    paths: RuntimePaths
+    logger: logging.Logger
+    token_manager_cls: type
+
+
+_DEFAULT_NOW = datetime.now()
+_DEFAULT_TODAY_STR = _DEFAULT_NOW.strftime("%Y-%m-%d")
+_DEFAULT_HOUR_STR = _DEFAULT_NOW.strftime("%H")
+
 INPUT_DIR = "input"
 INPUT_AD_CACHE_DIR = os.path.join(INPUT_DIR, "ad_cache")
 INPUT_MAPPING_DIR = os.path.join(INPUT_DIR, "mapping")
-OUTPUT_BASE_DIR = os.path.join("output", TODAY_STR)
+OUTPUT_BASE_DIR = os.path.join("output", _DEFAULT_TODAY_STR)
 OUTPUT_LOG_DIR = os.path.join(OUTPUT_BASE_DIR, "logs")
 OUTPUT_AD_CACHE_DIR = os.path.join(OUTPUT_BASE_DIR, "ad_cache")
 OUTPUT_ORGCHART_DIR = os.path.join(OUTPUT_BASE_DIR, "orgchart")
@@ -112,24 +135,130 @@ REPORT_DIR = os.path.join(OUTPUT_BASE_DIR, "report")
 CACHE_DIR = os.path.join(OUTPUT_BASE_DIR, "cache")
 CHECKPOINT_DIR = os.path.join(OUTPUT_BASE_DIR, "checkpoints")
 
-for d in [INPUT_AD_CACHE_DIR, INPUT_MAPPING_DIR, OUTPUT_LOG_DIR, OUTPUT_AD_CACHE_DIR,
-          OUTPUT_ORGCHART_DIR, STAGE2_DIR, STAGE3_DIR, STAGE4_DIR, REPORT_DIR,
-          CACHE_DIR, CHECKPOINT_DIR]:
-    os.makedirs(d, exist_ok=True)
+TENANT_ID = ""
+CLIENT_ID = ""
+SHAREPOINT_HOST = ""
+SITE_NAME = "aer"
+SENDER_EMAIL = ""
+AER_REVIEW_YEAR = str(_DEFAULT_NOW.year)
+AER_ROOT_PERSON = "Steven Bush"
+AER_ORG_DEPTH = 3
+AER_FUZZY_THRESHOLD = 89
+BASE_PATH = f"{AER_REVIEW_YEAR} Entitlement Review"
+AER_EMAIL_TEMPLATE_FOOTER = "Sincerely,\nInformation Security Team"
+TODAY_STR = _DEFAULT_TODAY_STR
+HOUR_STR = _DEFAULT_HOUR_STR
+LOG_FILE = os.path.join(OUTPUT_LOG_DIR, f"aer_{TODAY_STR}_{HOUR_STR}00.log")
 
 EMAIL_PATTERN = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[A-Za-z]{2,}$')
 BRACKET_CHARS = set("[](){}<>")
 KNOWN_DOMAIN_CORRECTIONS = {"apple-bank.com": "applebank.com"}
+
+_RUNTIME = None
+
+
+def _read_int_env(name, default):
+    raw = os.getenv(name, str(default)).strip()
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer, got {raw!r}") from exc
+
+
+def load_config():
+    """Load and validate environment configuration."""
+    load_dotenv(override=True)
+
+    review_year = os.getenv("AER_REVIEW_YEAR", str(datetime.now().year)).strip()
+    base_path = os.getenv("BASE_PATH", "").strip()
+    if not base_path:
+        base_path = os.getenv("APP_NAME", f"{review_year} Entitlement Review").strip()
+
+    config = AppConfig(
+        tenant_id=os.getenv("AZURE_TENANT_ID", "").strip(),
+        client_id=os.getenv("AZURE_CLIENT_ID", "").strip(),
+        sharepoint_host=os.getenv("SHAREPOINT_HOST", "").strip(),
+        site_name=os.getenv("SITE_NAME", "aer").strip(),
+        sender_email=os.getenv("SENDER_EMAIL", "").strip(),
+        review_year=review_year,
+        root_person=os.getenv("AER_ROOT_PERSON", "Steven Bush").strip(),
+        org_depth=_read_int_env("AER_ORG_DEPTH", 3),
+        fuzzy_threshold=_read_int_env("AER_FUZZY_THRESHOLD", 89),
+        base_path=base_path,
+        email_template_footer=os.getenv(
+            "AER_EMAIL_TEMPLATE_FOOTER",
+            "Sincerely,\nInformation Security Team",
+        ).strip().replace("\\n", "\n"),
+    )
+
+    missing = []
+    if not config.tenant_id:
+        missing.append("AZURE_TENANT_ID")
+    if not config.client_id:
+        missing.append("AZURE_CLIENT_ID")
+    if not config.sharepoint_host:
+        missing.append("SHAREPOINT_HOST")
+    if not config.sender_email:
+        missing.append("SENDER_EMAIL")
+    if missing:
+        raise RuntimeError(f"Missing required environment settings: {', '.join(missing)}")
+
+    return config
+
+
+def _build_paths(config, now=None):
+    runtime_now = now or datetime.now()
+    today_str = runtime_now.strftime("%Y-%m-%d")
+    hour_str = runtime_now.strftime("%H")
+    output_base_dir = os.path.join("output", today_str)
+    output_log_dir = os.path.join(output_base_dir, "logs")
+    return RuntimePaths(
+        today_str=today_str,
+        hour_str=hour_str,
+        input_dir=INPUT_DIR,
+        input_ad_cache_dir=os.path.join(INPUT_DIR, "ad_cache"),
+        input_mapping_dir=os.path.join(INPUT_DIR, "mapping"),
+        output_base_dir=output_base_dir,
+        output_log_dir=output_log_dir,
+        output_ad_cache_dir=os.path.join(output_base_dir, "ad_cache"),
+        output_orgchart_dir=os.path.join(output_base_dir, "orgchart"),
+        stage2_dir=os.path.join(output_base_dir, "stage2_validated"),
+        stage3_dir=os.path.join(output_base_dir, "stage3_review"),
+        stage4_dir=os.path.join(output_base_dir, "stage4_splitter"),
+        report_dir=os.path.join(output_base_dir, "report"),
+        cache_dir=os.path.join(output_base_dir, "cache"),
+        checkpoint_dir=os.path.join(output_base_dir, "checkpoints"),
+        log_file=os.path.join(output_log_dir, f"aer_{today_str}_{hour_str}00.log"),
+    )
+
+
+def ensure_runtime_dirs(config):
+    """Create the runtime directory tree and return resolved paths."""
+    paths = _build_paths(config)
+    for path in [
+        paths.input_ad_cache_dir,
+        paths.input_mapping_dir,
+        paths.output_log_dir,
+        paths.output_ad_cache_dir,
+        paths.output_orgchart_dir,
+        paths.stage2_dir,
+        paths.stage3_dir,
+        paths.stage4_dir,
+        paths.report_dir,
+        paths.cache_dir,
+        paths.checkpoint_dir,
+    ]:
+        os.makedirs(path, exist_ok=True)
+    return paths
 
 
 # ============================================
 # UNIFIED LOGGER
 # ============================================
 
-LOG_FILE = os.path.join(OUTPUT_LOG_DIR, f"aer_{TODAY_STR}_{HOUR_STR}00.log")
 aer_logger = logging.getLogger("aer")
-aer_logger.handlers.clear()
-aer_logger.setLevel(logging.INFO)
+if not aer_logger.handlers:
+    aer_logger.addHandler(logging.NullHandler())
 
 _log_formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
 
@@ -144,13 +273,22 @@ def _get_console_stream():
         pass
     return s or sys.stdout
 
-_ch = logging.StreamHandler(_get_console_stream())
-_ch.setFormatter(_log_formatter)
-aer_logger.addHandler(_ch)
+def setup_logger(paths):
+    """Configure the shared logger after runtime paths exist."""
+    global aer_logger
+    logger_obj = logging.getLogger("aer")
+    logger_obj.handlers.clear()
+    logger_obj.setLevel(logging.INFO)
 
-_fh = logging.FileHandler(LOG_FILE, encoding="utf-8", mode="a")
-_fh.setFormatter(_log_formatter)
-aer_logger.addHandler(_fh)
+    console_handler = logging.StreamHandler(_get_console_stream())
+    console_handler.setFormatter(_log_formatter)
+    logger_obj.addHandler(console_handler)
+
+    file_handler = logging.FileHandler(paths.log_file, encoding="utf-8", mode="a")
+    file_handler.setFormatter(_log_formatter)
+    logger_obj.addHandler(file_handler)
+    aer_logger = logger_obj
+    return logger_obj
 
 def logger(msg, level="info"):
     getattr(aer_logger, level, aer_logger.info)(msg)
@@ -298,7 +436,7 @@ class TokenManager:
         return scope_key in self._tokens
 
 
-token_mgr = TokenManager(TENANT_ID, CLIENT_ID)
+token_mgr = None
 
 
 # ============================================
@@ -579,7 +717,107 @@ class CheckpointManager:
         if os.path.exists(path):
             os.remove(path)
 
-checkpoint_mgr = CheckpointManager()
+checkpoint_mgr = None
+
+
+def _apply_runtime_globals(runtime):
+    """Bind runtime values back to the legacy module globals."""
+    global _RUNTIME
+    global aer_logger
+    global TENANT_ID, CLIENT_ID, SHAREPOINT_HOST, SITE_NAME, SENDER_EMAIL
+    global AER_REVIEW_YEAR, AER_ROOT_PERSON, AER_ORG_DEPTH, AER_FUZZY_THRESHOLD
+    global BASE_PATH, AER_EMAIL_TEMPLATE_FOOTER
+    global TODAY_STR, HOUR_STR
+    global INPUT_AD_CACHE_DIR, INPUT_MAPPING_DIR
+    global OUTPUT_BASE_DIR, OUTPUT_LOG_DIR, OUTPUT_AD_CACHE_DIR, OUTPUT_ORGCHART_DIR
+    global STAGE2_DIR, STAGE3_DIR, STAGE4_DIR, REPORT_DIR, CACHE_DIR, CHECKPOINT_DIR
+    global LOG_FILE, token_mgr, checkpoint_mgr
+
+    config = runtime.config
+    paths = runtime.paths
+
+    TENANT_ID = config.tenant_id
+    CLIENT_ID = config.client_id
+    SHAREPOINT_HOST = config.sharepoint_host
+    SITE_NAME = config.site_name
+    SENDER_EMAIL = config.sender_email
+    AER_REVIEW_YEAR = config.review_year
+    AER_ROOT_PERSON = config.root_person
+    AER_ORG_DEPTH = config.org_depth
+    AER_FUZZY_THRESHOLD = config.fuzzy_threshold
+    BASE_PATH = config.base_path
+    AER_EMAIL_TEMPLATE_FOOTER = config.email_template_footer
+
+    TODAY_STR = paths.today_str
+    HOUR_STR = paths.hour_str
+    INPUT_AD_CACHE_DIR = paths.input_ad_cache_dir
+    INPUT_MAPPING_DIR = paths.input_mapping_dir
+    OUTPUT_BASE_DIR = paths.output_base_dir
+    OUTPUT_LOG_DIR = paths.output_log_dir
+    OUTPUT_AD_CACHE_DIR = paths.output_ad_cache_dir
+    OUTPUT_ORGCHART_DIR = paths.output_orgchart_dir
+    STAGE2_DIR = paths.stage2_dir
+    STAGE3_DIR = paths.stage3_dir
+    STAGE4_DIR = paths.stage4_dir
+    REPORT_DIR = paths.report_dir
+    CACHE_DIR = paths.cache_dir
+    CHECKPOINT_DIR = paths.checkpoint_dir
+    LOG_FILE = paths.log_file
+
+    aer_logger = runtime.logger
+    token_mgr = runtime.token_manager_cls(TENANT_ID, CLIENT_ID)
+    checkpoint_mgr = CheckpointManager(CHECKPOINT_DIR)
+    _RUNTIME = runtime
+    return runtime
+
+
+def build_runtime():
+    """Create and bind the shared runtime for notebook stages."""
+    config = load_config()
+    paths = ensure_runtime_dirs(config)
+    logger_obj = setup_logger(paths)
+    runtime = AppRuntime(
+        config=config,
+        paths=paths,
+        logger=logger_obj,
+        token_manager_cls=TokenManager,
+    )
+    _apply_runtime_globals(runtime)
+    logger(f"Common Library initialized (v5.0) | {TODAY_STR}")
+    return runtime
+
+
+def runtime_status_lines(runtime=None):
+    """Return the bootstrap status lines shown in the notebook."""
+    active_runtime = runtime or _RUNTIME
+    if active_runtime is None:
+        raise RuntimeError("Runtime has not been initialized. Call build_runtime() first.")
+    return [
+        "✅ Common Library loaded",
+        f"   Today: {active_runtime.paths.today_str} | Review Year: {active_runtime.config.review_year}",
+        f"   Log: {active_runtime.paths.log_file}",
+        (
+            f"   Fuzzy: {'✅' if FUZZY_AVAILABLE else '❌'} | "
+            f"openpyxl: {'✅' if OPENPYXL_AVAILABLE else '❌'} | "
+            f"Win32COM: {'✅' if WIN32COM_AVAILABLE else '❌'}"
+        ),
+        f"   Chardet: {'✅' if CHARDET_AVAILABLE else '❌'} | Tkinter: {'✅' if TK_AVAILABLE else '❌'}",
+    ]
+
+
+def _inject_notebook_globals(namespace, runtime=None):
+    """Populate notebook globals with the shared module symbols."""
+    active_runtime = runtime or _RUNTIME
+    if active_runtime is None:
+        raise RuntimeError("Runtime has not been initialized. Call build_runtime() first.")
+    if _RUNTIME is not active_runtime:
+        _apply_runtime_globals(active_runtime)
+
+    namespace["app_runtime"] = active_runtime
+    for name, value in list(globals().items()):
+        if name.startswith("_"):
+            continue
+        namespace[name] = value
 
 
 # ============================================
@@ -669,15 +907,3 @@ def format_export_excel(file_path, audit_col_name="Audit Log"):
             current_height = ws.row_dimensions[row_idx].height or 15
             ws.row_dimensions[row_idx].height = max(current_height, min(15 * line_count, 300))
     wb.save(file_path)
-
-
-# ============================================
-# INIT COMPLETE
-# ============================================
-
-print(f"✅ Common Library loaded")
-print(f"   Today: {TODAY_STR} | Review Year: {AER_REVIEW_YEAR}")
-print(f"   Log: {LOG_FILE}")
-print(f"   Fuzzy: {'✅' if FUZZY_AVAILABLE else '❌'} | openpyxl: {'✅' if OPENPYXL_AVAILABLE else '❌'} | Win32COM: {'✅' if WIN32COM_AVAILABLE else '❌'}")
-print(f"   Chardet: {'✅' if CHARDET_AVAILABLE else '❌'} | Tkinter: {'✅' if TK_AVAILABLE else '❌'}")
-logger(f"Common Library initialized (v5.0) | {TODAY_STR}")
