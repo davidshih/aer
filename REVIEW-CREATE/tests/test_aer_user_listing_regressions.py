@@ -40,7 +40,7 @@ def _load_namespace(*function_names):
 
 
 def test_read_table_from_source_supports_uploaded_xlsx():
-    namespace = _load_namespace("read_table_from_source")
+    namespace = _load_namespace("read_table_from_source", "_read_source_bytes", "detect_tabular_kind")
     read_table_from_source = namespace["read_table_from_source"]
 
     expected = pd.DataFrame(
@@ -55,6 +55,21 @@ def test_read_table_from_source_supports_uploaded_xlsx():
     buffer.seek(0)
 
     actual = read_table_from_source("dept_mapping.xlsx", buffer)
+
+    pd.testing.assert_frame_equal(actual, expected)
+
+
+def test_read_table_from_source_auto_detects_excel_payload_with_csv_name():
+    namespace = _load_namespace("read_table_from_source", "_read_source_bytes", "detect_tabular_kind")
+    read_table_from_source = namespace["read_table_from_source"]
+
+    expected = pd.DataFrame({"department": ["Finance"], "reviewer": ["fin@example.com"]})
+
+    buffer = io.BytesIO()
+    expected.to_excel(buffer, index=False)
+    payload = buffer.getvalue()
+
+    actual = read_table_from_source("looks_like_csv.csv", payload)
 
     pd.testing.assert_frame_equal(actual, expected)
 
@@ -93,3 +108,19 @@ def test_build_stage2_output_path_avoids_same_second_collision(tmp_path):
 
     assert actual == str(tmp_path / "input_file_validated_20260312_091530_01.xlsx")
 
+
+def test_get_upload_file_payload_handles_dict_style_memoryview_upload():
+    namespace = _load_namespace("get_upload_file_item", "get_upload_file_payload")
+    get_upload_file_payload = namespace["get_upload_file_payload"]
+
+    upload_value = {
+        "mapping.xlsx": {
+            "name": "mapping.xlsx",
+            "content": memoryview(b"abc123"),
+        }
+    }
+
+    file_name, payload = get_upload_file_payload(upload_value, field_label="Stage 3 mapping")
+
+    assert file_name == "mapping.xlsx"
+    assert payload == b"abc123"
