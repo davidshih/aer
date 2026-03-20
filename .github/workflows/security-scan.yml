@@ -19,6 +19,7 @@ jobs:
   # Stage 1 — Strip notebook outputs and convert to .py
   # Notebooks store outputs (images, printed tokens, API responses)
   # in JSON — must be stripped BEFORE any secret scanner sees them.
+  # Uses nbconvert --clear-output which handles old nbformat gracefully.
   # ─────────────────────────────────────────────────────────────
   prepare:
     name: Prepare (Strip & Convert Notebooks)
@@ -46,12 +47,12 @@ jobs:
           echo "has_notebooks=$([ "$nb_count" -gt 0 ] && echo true || echo false)" >> $GITHUB_OUTPUT
 
           req_exists=false
-          [ -f requirements.txt ] || [ -f pyproject.toml ] || [ -f setup.py ] && req_exists=true
+          { [ -f requirements.txt ] || [ -f pyproject.toml ] || [ -f setup.py ]; } && req_exists=true || true
           echo "has_requirements=$req_exists" >> $GITHUB_OUTPUT
 
       - name: Install notebook tools
         if: steps.detect.outputs.has_notebooks == 'true'
-        run: pip install --quiet nbconvert nbstripout nbqa
+        run: pip install --quiet nbconvert nbqa
 
       - name: Strip outputs and convert notebooks to Python
         if: steps.detect.outputs.has_notebooks == 'true'
@@ -63,8 +64,12 @@ jobs:
           find /tmp/stripped -name "*.ipynb" \
             -not -path "*/.git/*" \
             -not -path "*/.ipynb_checkpoints/*" | while read nb; do
-            # Strip all cell outputs (removes printed tokens, API keys in output)
-            nbstripout "$nb"
+
+            # Strip all cell outputs in-place
+            # nbconvert --clear-output handles old nbformat (missing id fields) gracefully
+            jupyter nbconvert --clear-output --inplace "$nb" 2>/dev/null \
+              && echo "✓ stripped: ${nb#/tmp/stripped/}" \
+              || echo "⚠ strip failed (skipping): ${nb#/tmp/stripped/}"
 
             # Convert to .py preserving relative directory structure
             rel_dir=$(dirname "${nb#/tmp/stripped/}")
@@ -73,7 +78,7 @@ jobs:
               --output-dir "/tmp/converted/$rel_dir" \
               --no-prompt 2>/dev/null \
               && echo "✓ converted: ${nb#/tmp/stripped/}" \
-              || echo "⚠ skipped:   ${nb#/tmp/stripped/}"
+              || echo "⚠ convert skipped: ${nb#/tmp/stripped/}"
           done
 
           echo ""
@@ -127,7 +132,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         continue-on-error: true
 
-      # Scan stripped notebooks for secrets in CODE cells
+      # Scan stripped notebooks for secrets in CODE cells only
       - name: Download stripped notebooks
         if: needs.prepare.outputs.has_notebooks == 'true'
         uses: actions/download-artifact@v4
@@ -163,7 +168,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────
   # Stage 2b — Static Analysis (SAST)
   # Run bandit via nbqa directly on .ipynb (most accurate),
-  # and semgrep on both .ipynb + converted .py files.
+  # and semgrep on both source .py + converted notebook .py files.
   # ─────────────────────────────────────────────────────────────
   sast-scan:
     name: Static Analysis (SAST)
@@ -177,7 +182,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Download artifacts
+      - name: Download stripped notebooks
         if: needs.prepare.outputs.has_notebooks == 'true'
         uses: actions/download-artifact@v4
         with:
@@ -196,7 +201,7 @@ jobs:
 
       # nbqa runs bandit INSIDE each notebook cell-by-cell
       # This is more accurate than scanning converted .py files
-      - name: nbqa bandit (notebooks — direct)
+      - name: nbqa bandit (notebooks direct)
         if: needs.prepare.outputs.has_notebooks == 'true'
         run: |
           echo "── nbqa bandit on stripped notebooks ──────────────"
@@ -207,8 +212,7 @@ jobs:
             2>/dev/null \
             || echo "::warning::bandit found issues in notebooks"
 
-      # Bandit on original .py source files
-      - name: Bandit (source .py)
+      - name: Bandit (source .py files)
         run: |
           echo "── bandit on source .py ────────────────────────────"
           bandit -r . \
@@ -225,18 +229,19 @@ jobs:
             2>/dev/null \
             || echo "::warning::bandit found issues in source"
 
-      # Semgrep supports .ipynb natively in v1.x
+      # Semgrep 1.x supports .ipynb natively
       - name: Semgrep
         run: |
           echo "── semgrep ─────────────────────────────────────────"
+          EXTRA=""
+          [ -d /tmp/converted ] && EXTRA="/tmp/converted"
           semgrep scan \
             --config=p/python \
             --config=p/security-audit \
             --config=p/secrets \
             --sarif --output=semgrep.sarif \
             --exclude=".git" --exclude="venv" --exclude=".venv" \
-            . \
-            $([ -d /tmp/converted ] && echo "/tmp/converted") \
+            . $EXTRA \
             --no-error 2>/dev/null \
             || echo "::warning::semgrep found issues"
 
@@ -269,8 +274,7 @@ jobs:
           pip-audit -r requirements.txt --desc \
             || echo "::warning::pip-audit found vulnerable packages"
 
-      # Bonus: list all packages imported inside notebooks
-      # Makes it easy to spot unlisted dependencies
+      # Bonus: cross-check notebook imports against requirements.txt
       - name: Audit notebook imports vs requirements.txt
         if: needs.prepare.outputs.has_notebooks == 'true'
         run: |
@@ -303,8 +307,8 @@ jobs:
                     'hashlib','base64','io','copy','abc','enum','warnings',
                     'logging','argparse','subprocess','shutil','tempfile',
                     'contextlib','dataclasses','threading','concurrent'}
-          external = nb_imports - stdlib - {'__future__'}
-          undeclared = external - declared
+          external    = nb_imports - stdlib - {'__future__'}
+          undeclared  = external - declared
 
           print(f'Notebook imports   : {sorted(external)}')
           print(f'Declared in req.txt: {sorted(declared)}')
