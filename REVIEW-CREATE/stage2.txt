@@ -1,0 +1,1819 @@
+# === CELL 2: Email/User Validation & AD Status Check ===
+"""
+Stage 2: Email/User Validation with Enhanced UI (Jupyter Cell) v8.2
+
+Short Description:
+Enhanced section-based review UI while keeping v8.1 validation/save logic.
+
+Modified:
+2026-02-25
+
+Key Rules:
+1. Keep v8.1 logic for AD cache loading and validation flow.
+2. Auto-correct email domain typo: @apple-bank.com -> @applebank.com.
+3. For top fuzzy score <= 89, default selection is "Keep Original Email/Name".
+4. Candidate suggestions remain selectable for manual override.
+5. Keep unresolved and hidden statuses in output with Validation Status.
+
+Copy and paste this entire cell into Jupyter notebook and run.
+"""
+
+import os
+import sys
+import re
+import io
+import glob
+import logging
+import html
+import unicodedata
+from typing import Dict, List, Tuple
+from datetime import datetime
+import pandas as pd
+import ipywidgets as widgets
+from IPython.display import display, HTML, clear_output
+
+# Try import fuzzy matching
+try:
+    from rapidfuzz import fuzz, process
+    FUZZY_AVAILABLE = True
+except ImportError:
+    try:
+        from fuzzywuzzy import fuzz, process
+        FUZZY_AVAILABLE = True
+    except ImportError:
+        FUZZY_AVAILABLE = False
+        print("⚠️ Fuzzy matching unavailable. Install: pip install rapidfuzz")
+
+# ============================================
+# Setup Paths
+# ============================================
+
+today_str = datetime.now().strftime('%Y-%m-%d')
+BASE_DIR = os.path.join("output", today_str, "user-listing")
+OUTPUT_AD_CACHE_DIR = os.path.join(BASE_DIR, "ad_cache")
+INPUT_AD_CACHE_DIR = os.path.join("input", "ad_cache")
+STAGE2_DIR = os.path.join(BASE_DIR, "stage2_validated")
+LOG_DIR = os.path.join(BASE_DIR, "logs")
+os.makedirs(STAGE2_DIR, exist_ok=True)
+os.makedirs(LOG_DIR, exist_ok=True)
+
+APPLE_BANK_WRONG_DOMAIN = "@apple-bank.com"
+APPLE_BANK_CORRECT_DOMAIN = "@applebank.com"
+LOW_CONFIDENCE_KEEP_THRESHOLD = 89
+PREFERRED_NAME_CHANGE_FILE = os.path.join("input", "preferred_name_changes.csv")
+
+# ============================================
+# Validation Status Enum
+# ============================================
+
+class ValidationStatus:
+    """Validation status categories"""
+    VALID_PERFECT = "valid_perfect"
+    WARN_NAME_MISMATCH = "warn_name_mismatch"
+    INFO_FUZZY_UNIQUE = "info_fuzzy_unique"
+    ERR_FUZZY_MULTIPLE = "err_fuzzy_multiple"
+    ERR_NOT_FOUND = "err_not_found"
+    ERR_EMAIL_INVALID = "err_email_invalid"
+    ERR_MISSING_DATA = "err_missing_data"
+
+    @staticmethod
+    def get_display_text(status: str) -> str:
+        status_map = {
+            ValidationStatus.VALID_PERFECT: "✅ Verified (Email & Name Match)",
+            ValidationStatus.WARN_NAME_MISMATCH: "⚠️ Email Valid - Name Mismatch",
+            ValidationStatus.INFO_FUZZY_UNIQUE: "🔵 Auto-Matched by Name (Single Match)",
+            ValidationStatus.ERR_FUZZY_MULTIPLE: "🟠 Manual Selection Required (Multiple Matches)",
+            ValidationStatus.ERR_NOT_FOUND: "❌ User Not Found in AD",
+            ValidationStatus.ERR_EMAIL_INVALID: "❌ Email Not in AD",
+            ValidationStatus.ERR_MISSING_DATA: "⚪ Insufficient Data"
+        }
+        return status_map.get(status, "Unknown Status")
+
+# ============================================
+# Global State
+# ============================================
+
+stage2_ad_cache = {}
+stage2_name_index = {}
+stage2_preferred_name_map = {}
+stage2_input_df = None
+stage2_input_filename = ""
+stage2_categorized = {}
+stage2_ui_rows = {}
+
+# ============================================
+# Logging
+# ============================================
+
+stage2_log_file = os.path.join(LOG_DIR, f"aer_stage2_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+logger_s2 = logging.getLogger("aer_stage2")
+logger_s2.handlers.clear()
+logger_s2.setLevel(logging.DEBUG)
+logger_s2.propagate = False
+stage2_formatter = logging.Formatter('%(asctime)s | %(levelname)s | %(message)s')
+stage2_fh = logging.FileHandler(stage2_log_file, encoding="utf-8")
+stage2_fh.setFormatter(stage2_formatter)
+stage2_fh.setLevel(logging.DEBUG)
+logger_s2.addHandler(stage2_fh)
+stage2_sh = logging.StreamHandler(sys.stdout)
+stage2_sh.setLevel(logging.INFO)
+stage2_sh.setFormatter(stage2_formatter)
+logger_s2.addHandler(stage2_sh)
+
+# ============================================
+# Helper Functions
+# ============================================
+
+def get_upload_file_item(upload_value):
+    """Normalize ipywidgets FileUpload values across versions."""
+    if not upload_value:
+        return None
+    if isinstance(upload_value, dict):
+        if not upload_value:
+            return None
+        first_key = next(iter(upload_value))
+        return upload_value.get(first_key)
+    if isinstance(upload_value, (list, tuple)):
+        return upload_value[0] if upload_value else None
+    return None
+
+
+def get_upload_file_payload(upload_value, field_label="upload"):
+    """Return normalized upload name + bytes payload for notebook widgets."""
+    item = get_upload_file_item(upload_value)
+    if not item:
+        raise ValueError(f"No {field_label} file selected")
+
+    name = str(item.get('name') or item.get('metadata', {}).get('name') or '').strip()
+    content = item.get('content')
+
+    if isinstance(content, memoryview):
+        content = content.tobytes()
+    elif isinstance(content, bytearray):
+        content = bytes(content)
+    elif content is None:
+        content = b''
+
+    if not isinstance(content, bytes):
+        content = bytes(content)
+
+    if not name:
+        raise ValueError(f"{field_label} file name is missing")
+
+    return name, content
+
+
+def _read_source_bytes(source):
+    """Return bytes from a path, bytes-like object, or file-like object."""
+    if isinstance(source, (str, os.PathLike)):
+        with open(source, 'rb') as fh:
+            return fh.read()
+    if isinstance(source, bytes):
+        return source
+    if isinstance(source, bytearray):
+        return bytes(source)
+    if isinstance(source, memoryview):
+        return source.tobytes()
+    if hasattr(source, 'getvalue'):
+        data = source.getvalue()
+    elif hasattr(source, 'read'):
+        if hasattr(source, 'seek'):
+            source.seek(0)
+        data = source.read()
+    else:
+        raise ValueError("Unsupported source type")
+
+    if isinstance(data, memoryview):
+        data = data.tobytes()
+    elif isinstance(data, bytearray):
+        data = bytes(data)
+    elif not isinstance(data, bytes):
+        data = bytes(data)
+    return data
+
+
+def detect_tabular_kind(file_name, raw_bytes):
+    """Detect whether uploaded bytes look like CSV/text or an Excel workbook."""
+    suffix = os.path.splitext(str(file_name or ''))[1].lower()
+    header = raw_bytes[:8]
+    if header.startswith(b'PK\x03\x04'):
+        return 'excel'
+    if header.startswith(b'\xd0\xcf\x11\xe0'):
+        return 'excel'
+    if suffix in {'.xlsx', '.xlsm', '.xls'}:
+        return 'excel'
+    if suffix == '.csv':
+        return 'csv'
+    if b'\x00' in raw_bytes[:256]:
+        return 'excel'
+    return 'csv'
+
+
+def read_table_from_source(file_name, source, label="file", logger=None):
+    """Read a CSV/XLSX file with detailed logging and fallback parser attempts."""
+    raw_bytes = _read_source_bytes(source)
+    size_bytes = len(raw_bytes)
+    if size_bytes == 0:
+        raise ValueError(f"{label} '{file_name}' is empty (0 bytes)")
+
+    detected_kind = detect_tabular_kind(file_name, raw_bytes)
+    suffix = os.path.splitext(str(file_name or ''))[1].lower() or '<none>'
+    header_hex = raw_bytes[:8].hex()
+
+    if logger:
+        logger.info(
+            f"{label} load start | file={file_name} | suffix={suffix} | size_bytes={size_bytes} | detected={detected_kind} | header={header_hex}"
+        )
+
+    if suffix == '.csv' and detected_kind == 'excel' and logger:
+        logger.warning(f"{label} '{file_name}' is named .csv but detected as Excel; using Excel reader")
+
+    if detected_kind == 'excel':
+        try:
+            df = pd.read_excel(io.BytesIO(raw_bytes))
+            if logger:
+                logger.info(f"{label} load success | parser=excel | rows={len(df)} | columns={list(df.columns)}")
+            return df
+        except Exception as exc:
+            if logger:
+                logger.error(f"{label} Excel read failed for {file_name}: {exc}", exc_info=True)
+            raise ValueError(f"Unable to read Excel {label} '{file_name}': {exc}") from exc
+
+    attempts = [
+        ('csv-default', {}),
+        ('csv-sniff', {'sep': None, 'engine': 'python'}),
+        ('csv-utf16-sniff', {'encoding': 'utf-16', 'sep': None, 'engine': 'python'}),
+        ('csv-latin1-sniff', {'encoding': 'latin-1', 'sep': None, 'engine': 'python'}),
+    ]
+    errors = []
+    for parser_name, parser_kwargs in attempts:
+        try:
+            df = pd.read_csv(io.BytesIO(raw_bytes), **parser_kwargs)
+            if logger:
+                logger.info(f"{label} load success | parser={parser_name} | rows={len(df)} | columns={list(df.columns)}")
+            return df
+        except Exception as exc:
+            errors.append(f"{parser_name}: {exc}")
+            if logger:
+                logger.warning(f"{label} load failed | parser={parser_name} | file={file_name} | error={exc}")
+
+    error_message = ' | '.join(errors)
+    if logger:
+        logger.error(f"{label} CSV read failed for {file_name}: {error_message}")
+    raise ValueError(f"Unable to read {label} '{file_name}'. Attempts: {error_message}")
+
+
+def is_email_valid(email) -> bool:
+    """Check if email is valid"""
+    if pd.isna(email):
+        return False
+    email_str = str(email).strip().lower()
+    if email_str in ['', 'nan', 'none', 'n/a', 'na', '#n/a']:
+        return False
+    if '@' not in email_str or '.' not in email_str:
+        return False
+    if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email_str):
+        return False
+    return True
+
+
+def normalize_input_email(email) -> Tuple[str, bool]:
+    """Normalize input email and auto-correct known domain typo."""
+    if pd.isna(email):
+        return "", False
+
+    email_str = str(email).strip().lower()
+    if not email_str:
+        return "", False
+
+    if email_str.endswith(APPLE_BANK_WRONG_DOMAIN):
+        corrected = email_str[: -len(APPLE_BANK_WRONG_DOMAIN)] + APPLE_BANK_CORRECT_DOMAIN
+        return corrected, corrected != email_str
+
+    return email_str, False
+
+
+def normalize_name(name) -> str:
+    """Normalize name for fuzzy matching"""
+    if not name or pd.isna(name):
+        return ""
+    name = str(name).lower()
+    name = unicodedata.normalize('NFKC', name)
+    name = re.sub(r'[^a-z0-9\s]', ' ', name)
+    name = ' '.join(name.split())
+    return name.strip()
+
+
+def load_preferred_name_changes() -> Tuple[bool, str]:
+    """Load optional preferred-name overrides for AD name lookup."""
+    global stage2_preferred_name_map
+    stage2_preferred_name_map = {}
+
+    if not os.path.exists(PREFERRED_NAME_CHANGE_FILE):
+        return True, f"Preferred-name override file not found: {os.path.basename(PREFERRED_NAME_CHANGE_FILE)}"
+
+    try:
+        df = pd.read_csv(PREFERRED_NAME_CHANGE_FILE)
+        cols_lower = {str(c).strip().lower(): c for c in df.columns}
+        required = {'old_name', 'new_name'}
+        missing = sorted(list(required - set(cols_lower.keys())))
+        if missing:
+            return False, f"Preferred-name override file missing columns: {missing}"
+
+        old_col = cols_lower['old_name']
+        new_col = cols_lower['new_name']
+        loaded = 0
+
+        for _, row in df.iterrows():
+            old_name = str(row.get(old_col, '') or '').strip()
+            new_name = str(row.get(new_col, '') or '').strip()
+            if not old_name or not new_name:
+                continue
+            if old_name.lower() == 'nan' or new_name.lower() == 'nan':
+                continue
+
+            old_norm = normalize_name(old_name)
+            new_norm = normalize_name(new_name)
+            if not old_norm or not new_norm:
+                continue
+
+            stage2_preferred_name_map[old_norm] = {
+                'old_name': old_name,
+                'new_name': new_name,
+                'new_name_normalized': new_norm
+            }
+            loaded += 1
+
+        return True, f"Loaded {loaded} preferred-name override(s) from {os.path.basename(PREFERRED_NAME_CHANGE_FILE)}"
+    except Exception as e:
+        stage2_preferred_name_map = {}
+        return False, f"Preferred-name override file error: {str(e)}"
+
+
+def normalize_department_name(dept) -> str:
+    """Normalize department text for matching."""
+    if not dept or pd.isna(dept):
+        return ""
+    dept = str(dept).lower()
+    dept = unicodedata.normalize('NFKC', dept)
+    dept = re.sub(r'[^a-z0-9\s]', ' ', dept)
+    dept = ' '.join(dept.split())
+    return dept.strip()
+
+
+def department_match_score(target_dept, candidate_dept) -> int:
+    """Score department similarity for tie-breaking.
+    2 = exact/normalized match, 1 = partial/token overlap, 0 = no signal.
+    """
+    target_norm = normalize_department_name(target_dept)
+    candidate_norm = normalize_department_name(candidate_dept)
+    if not target_norm or not candidate_norm:
+        return 0
+    if target_norm == candidate_norm:
+        return 2
+    if target_norm in candidate_norm or candidate_norm in target_norm:
+        return 1
+    target_tokens = set(target_norm.split())
+    candidate_tokens = set(candidate_norm.split())
+    return 1 if target_tokens and candidate_tokens and target_tokens.intersection(candidate_tokens) else 0
+
+
+def _build_ranked_matches(emails, ad_cache: Dict, target_dept='', score: int = 100, match_type: str = 'exact') -> List[Dict]:
+    """Build match rows and sort them with department as a tie-breaker."""
+    results = []
+    for email in sorted(set(emails)):
+        user = ad_cache.get(email)
+        if not user:
+            continue
+        dept_level = department_match_score(target_dept, user.get('dept', ''))
+        results.append({
+            'email': email,
+            'name': user['name'],
+            'dept': user['dept'],
+            'score': int(score),
+            'match_type': match_type,
+            'dept_match': dept_level > 0,
+            'dept_match_level': dept_level
+        })
+    results.sort(
+        key=lambda item: (
+            -int(item.get('dept_match_level', 0)),
+            -int(item.get('score', 0)),
+            str(item.get('name', '')).lower(),
+            str(item.get('email', '')).lower()
+        )
+    )
+    return results
+
+
+def fuzzy_match_name(target_name: str, name_index: Dict, ad_cache: Dict, target_dept='', top_n: int = 5) -> List[Dict]:
+    """Find best email matches for a name"""
+    if not name_index:
+        return []
+
+    norm_target = normalize_name(target_name)
+    if not norm_target:
+        return []
+
+    # Exact name check first (works even if fuzzy library is unavailable)
+    exact_matches = _build_ranked_matches(name_index.get(norm_target, []), ad_cache, target_dept=target_dept, score=100, match_type='exact')
+    if exact_matches:
+        exact_dept_matches = [m for m in exact_matches if int(m.get('dept_match_level', 0)) == 2]
+        if len(exact_dept_matches) == 1:
+            return exact_dept_matches
+        partial_dept_matches = [m for m in exact_matches if int(m.get('dept_match_level', 0)) > 0]
+        if len(partial_dept_matches) == 1:
+            return partial_dept_matches
+        return exact_matches[:top_n]
+
+    if not FUZZY_AVAILABLE:
+        return []
+
+    # Fuzzy search
+    try:
+        candidates = list(name_index.keys())
+        matches = process.extract(
+            norm_target,
+            candidates,
+            scorer=fuzz.token_sort_ratio,
+            limit=top_n * 2
+        )
+
+        results = []
+        seen = set()
+
+        for match_name, score, _ in matches:
+            if score < 70:
+                continue
+
+            ranked = _build_ranked_matches(
+                name_index.get(match_name, []),
+                ad_cache,
+                target_dept=target_dept,
+                score=int(score),
+                match_type='high' if score >= 90 else 'medium'
+            )
+
+            for candidate in ranked:
+                email = candidate['email']
+                if email in seen:
+                    continue
+                seen.add(email)
+                results.append(candidate)
+                if len(results) >= top_n:
+                    break
+
+            if len(results) >= top_n:
+                break
+
+        return results
+    except:
+        return []
+
+
+def load_ad_cache():
+    """Load AD cache from Stage 1"""
+    global stage2_ad_cache, stage2_name_index
+
+    try:
+        stage2_ad_cache = {}
+        stage2_name_index = {}
+
+        cache_files = glob.glob(os.path.join(INPUT_AD_CACHE_DIR, "ad_users_*.csv"))
+        if not cache_files:
+            cache_files = glob.glob(os.path.join(OUTPUT_AD_CACHE_DIR, "ad_users_*.csv"))
+        if not cache_files:
+            return False, "No AD cache found. Please run Stage 1 first."
+
+        latest_cache = max(cache_files, key=os.path.getmtime)
+        df = pd.read_csv(latest_cache)
+
+        # Build cache
+        for _, row in df.iterrows():
+            email = str(row['email']).lower().strip()
+            if not email or email == 'nan':
+                continue
+
+            active_raw = row.get('accountEnabled', False)
+            if isinstance(active_raw, str):
+                active_raw = active_raw.strip().lower() in ['true', '1', 'yes', 'y']
+
+            last_update = row.get('activeIn3Months', row.get('signInAgeRange', row.get('lastSignInDateTime', 'N/A')))
+            if pd.isna(last_update):
+                last_update = 'N/A'
+
+            stage2_ad_cache[email] = {
+                'email': email,
+                'name': row.get('displayName', ''),
+                'dept': row.get('department', ''),
+                'active': bool(active_raw),
+                'last_update_status': str(last_update)
+            }
+
+            # Build name index
+            norm_name = normalize_name(row['displayName'])
+            if norm_name:
+                stage2_name_index.setdefault(norm_name, [])
+                if email not in stage2_name_index[norm_name]:
+                    stage2_name_index[norm_name].append(email)
+
+                # Add reversed name
+                parts = norm_name.split()
+                if len(parts) == 2:
+                    reversed_name = f"{parts[1]} {parts[0]}"
+                    stage2_name_index.setdefault(reversed_name, [])
+                    if email not in stage2_name_index[reversed_name]:
+                        stage2_name_index[reversed_name].append(email)
+
+        return True, f"Loaded {len(stage2_ad_cache)} users from {os.path.basename(latest_cache)}"
+
+    except Exception as e:
+        return False, f"Error loading AD cache: {str(e)}"
+
+
+def categorize_user(row: pd.Series, ad_cache: Dict, name_index: Dict) -> Tuple[str, Dict]:
+    """Categorize a user record"""
+    user_email = row.get('Email') if 'Email' in row.index else row.iloc[0]
+    user_name = row.get('User Name') if 'User Name' in row.index else row.iloc[1] if len(row) > 1 else ''
+    user_department = ''
+    for col in row.index:
+        col_key = str(col).strip().lower()
+        if 'department' in col_key or col_key == 'dept':
+            user_department = row.get(col)
+            break
+    normalized_email, email_auto_corrected = normalize_input_email(user_email)
+    normalized_original_name = normalize_name(user_name)
+    preferred_name_info = stage2_preferred_name_map.get(normalized_original_name, {})
+    preferred_name_applied = bool(preferred_name_info)
+    lookup_name = preferred_name_info.get('new_name', user_name)
+    lookup_name_normalized = preferred_name_info.get('new_name_normalized', normalize_name(lookup_name))
+    normalized_department = normalize_department_name(user_department)
+
+    metadata = {
+        'original_email': user_email,
+        'normalized_email': normalized_email,
+        'email_auto_corrected': email_auto_corrected,
+        'email_valid': False,
+        'email_in_ad': False,
+        'fallback_from_email': False,
+        'email_lookup_message': '',
+        'original_name': user_name,
+        'original_name_normalized': normalized_original_name,
+        'original_department': user_department,
+        'normalized_department': normalized_department,
+        'lookup_name_used': lookup_name,
+        'lookup_name_normalized': lookup_name_normalized,
+        'preferred_name_applied': preferred_name_applied,
+        'preferred_name_from': preferred_name_info.get('old_name', ''),
+        'preferred_name_to': preferred_name_info.get('new_name', ''),
+        'score_source': '',
+        'score_algorithm': '',
+        'score_percent': 0,
+        'top_score': 0,
+        'top_candidate_email': '',
+        'top_candidate_name': '',
+        'top_candidate_dept': '',
+        'top_candidate_dept_match_level': 0,
+        'top_match_basis': '',
+        'ad_user': None,
+        'fuzzy_matches': [],
+        'validation_message': '',
+        'final_email': '',
+        'final_name': ''
+    }
+
+    email_valid = is_email_valid(normalized_email)
+    metadata['email_valid'] = email_valid
+
+    # Case 1: Both missing
+    if not email_valid and (not user_name or pd.isna(user_name) or str(user_name).strip() == ''):
+        metadata['validation_message'] = 'Insufficient data'
+        return ValidationStatus.ERR_MISSING_DATA, metadata
+
+    # Case 2: Email valid
+    fallback_from_email = False
+    email_lookup_message = ''
+
+    if email_valid:
+        email_clean = normalized_email
+
+        if email_clean in ad_cache:
+            ad_user = ad_cache[email_clean]
+            metadata['ad_user'] = ad_user
+            metadata['final_email'] = email_clean
+            metadata['final_name'] = ad_user['name']
+            metadata['email_in_ad'] = True
+            metadata['score_source'] = 'email'
+            metadata['score_algorithm'] = 'email_exact'
+            metadata['score_percent'] = 100
+            if email_auto_corrected:
+                metadata['validation_message'] = (
+                    f'Email matched in AD after domain auto-correction ({APPLE_BANK_WRONG_DOMAIN} -> {APPLE_BANK_CORRECT_DOMAIN})'
+                )
+            else:
+                metadata['validation_message'] = 'Email matched in AD (AD name enforced)'
+            metadata['email_lookup_message'] = metadata['validation_message']
+            return ValidationStatus.VALID_PERFECT, metadata
+
+        fallback_from_email = True
+        metadata['fallback_from_email'] = True
+        if email_auto_corrected:
+            email_lookup_message = (
+                f'Email not in AD after domain auto-correction ({APPLE_BANK_WRONG_DOMAIN} -> {APPLE_BANK_CORRECT_DOMAIN})'
+            )
+        else:
+            email_lookup_message = 'Email not in AD'
+        metadata['email_lookup_message'] = email_lookup_message
+
+    # Case 3: Email missing or not found, try fuzzy match
+    if not user_name or pd.isna(user_name) or str(user_name).strip() == '':
+        if fallback_from_email:
+            metadata['validation_message'] = email_lookup_message
+            return ValidationStatus.ERR_EMAIL_INVALID, metadata
+        metadata['validation_message'] = 'No name provided'
+        return ValidationStatus.ERR_MISSING_DATA, metadata
+
+    fuzzy_matches = fuzzy_match_name(lookup_name, name_index, ad_cache, target_dept=user_department, top_n=5)
+
+    if not fuzzy_matches:
+        if fallback_from_email:
+            metadata['validation_message'] = f'{email_lookup_message}; no name match found'
+            return ValidationStatus.ERR_EMAIL_INVALID, metadata
+        metadata['validation_message'] = 'No match found'
+        return ValidationStatus.ERR_NOT_FOUND, metadata
+
+    metadata['fuzzy_matches'] = fuzzy_matches
+    metadata['score_source'] = 'name'
+    top_match = fuzzy_matches[0] if fuzzy_matches else {}
+    metadata['top_score'] = int(top_match.get('score', 0) or 0)
+    metadata['score_percent'] = int(metadata['top_score'])
+    metadata['top_candidate_email'] = str(top_match.get('email', '') or '').strip().lower()
+    metadata['top_candidate_name'] = str(top_match.get('name', '') or '').strip()
+    metadata['top_candidate_dept'] = str(top_match.get('dept', '') or '').strip()
+    metadata['top_candidate_dept_match_level'] = int(top_match.get('dept_match_level', 0) or 0)
+    metadata['top_match_basis'] = 'name + department' if top_match.get('dept_match') else 'name'
+    if str(top_match.get('match_type', '')).lower() == 'exact':
+        metadata['score_algorithm'] = 'name_exact_normalized'
+    else:
+        metadata['score_algorithm'] = 'name_fuzzy_token_sort_ratio'
+
+    if len(fuzzy_matches) == 1:
+        match = fuzzy_matches[0]
+        match_basis = 'name + department' if match.get('dept_match') else 'name'
+        if match['score'] >= 80:
+            # High confidence - auto-populate
+            metadata['final_email'] = match['email']
+            metadata['final_name'] = match['name']
+            if fallback_from_email:
+                metadata['validation_message'] = f'{email_lookup_message}; matched by {match_basis}: {match["score"]}%'
+            else:
+                metadata['validation_message'] = f'Single match ({match_basis}): {match["score"]}%'
+            return ValidationStatus.INFO_FUZZY_UNIQUE, metadata
+        else:
+            # Low confidence - require manual selection
+            if fallback_from_email:
+                metadata['validation_message'] = f'{email_lookup_message}; low confidence {match_basis} match: {match["score"]}%'
+            else:
+                metadata['validation_message'] = f'Low confidence ({match_basis}): {match["score"]}%'
+            return ValidationStatus.ERR_FUZZY_MULTIPLE, metadata
+    else:
+        if fallback_from_email:
+            metadata['validation_message'] = f'{email_lookup_message}; {len(fuzzy_matches)} name matches found'
+        else:
+            metadata['validation_message'] = f'{len(fuzzy_matches)} matches found'
+        return ValidationStatus.ERR_FUZZY_MULTIPLE, metadata
+
+
+# ============================================
+# UI Components
+# ============================================
+
+def _candidate_option_label(match: Dict) -> str:
+    """Build dropdown label with AD status and last update."""
+    ad = stage2_ad_cache.get(match['email'], {})
+    ad_status = 'Active' if ad.get('active') else 'Disabled'
+    last_update = ad.get('last_update_status', 'N/A')
+    dept_hint = ''
+    if int(match.get('dept_match_level', 0)) == 2:
+        dept_hint = ' | Dept:Exact'
+    elif int(match.get('dept_match_level', 0)) == 1:
+        dept_hint = ' | Dept:Partial'
+    return (
+        f"{match['name']} | {match['email']} | {match['dept']} | "
+        f"Score {match['score']}%{dept_hint} | AD:{ad_status} | Last:{last_update}"
+    )
+
+
+def _candidate_rank_hint(match: Dict) -> str:
+    """Human-readable rank hint for the review card."""
+    level = int(match.get('dept_match_level', 0))
+    if level == 2:
+        return 'Dept exact'
+    if level == 1:
+        return 'Dept partial'
+    return 'Name only'
+
+
+def _candidate_detail_html(fuzzy_matches: List[Dict], theme_color: str) -> widgets.HTML:
+    """Render a readable, non-truncated candidate summary list."""
+    blocks = []
+    for idx, match in enumerate(fuzzy_matches, 1):
+        blocks.append(
+            f"<div style='margin:0 0 8px 0; padding:8px 10px; border:1px solid #e5e7eb; border-radius:6px; background:white;'>"
+            f"<div><b>{idx}. {match.get('name', '(blank)')}</b></div>"
+            f"<div style='color:#444; line-height:1.5;'>{match.get('email', '')}</div>"
+            f"<div style='color:#666; line-height:1.5;'>Dept: {match.get('dept', 'N/A')} | Score: {match.get('score', 0)}% | {_candidate_rank_hint(match)}</div>"
+            f"</div>"
+        )
+
+    detail_html = ''.join(blocks) if blocks else "<div style='color:#666;'>No fuzzy suggestions available</div>"
+    return widgets.HTML(
+        value=f"""
+        <div style='margin-top:8px; padding:10px 12px; border:1px dashed {theme_color}; background:#ffffff; border-radius:8px; width:100%; line-height:1.5;'>
+            <b>Suggested Matches</b>
+            <div style='margin-top:8px;'>{detail_html}</div>
+        </div>
+        """,
+        layout=widgets.Layout(width='100%')
+    )
+
+
+def _preferred_name_override_html(metadata: Dict) -> str:
+    """Return HTML line when a preferred-name override was used."""
+    if not metadata.get('preferred_name_applied'):
+        return ''
+    old_name = str(metadata.get('preferred_name_from', '') or metadata.get('original_name', '')).strip() or '(blank)'
+    new_name = str(metadata.get('preferred_name_to', '') or metadata.get('lookup_name_used', '')).strip() or '(blank)'
+    return f"<b>Preferred Name Override:</b> {old_name} -&gt; {new_name}<br>"
+
+
+def _dept_match_level_label(level: int) -> str:
+    """Map department match level to a readable label."""
+    level = int(level or 0)
+    if level == 2:
+        return 'Exact'
+    if level == 1:
+        return 'Partial'
+    return 'None'
+
+
+def _match_logic_breakdown_html(metadata: Dict, fuzzy_matches: List[Dict]) -> str:
+    """Explain match scoring inputs for this row (email-first)."""
+    original_email = html.escape(str(metadata.get('original_email', '') or '').strip())
+    normalized_email = html.escape(str(metadata.get('normalized_email', '') or '').strip())
+    email_valid = bool(metadata.get('email_valid'))
+    email_in_ad = bool(metadata.get('email_in_ad'))
+    email_auto_corrected = bool(metadata.get('email_auto_corrected'))
+    email_lookup_message = html.escape(str(metadata.get('email_lookup_message', '') or '').strip())
+
+    if not email_valid:
+        email_result = 'Missing/invalid (skip email lookup)'
+    elif email_in_ad:
+        email_result = 'Exact match in AD (auto-resolved 100%)'
+    else:
+        email_result = 'Not found in AD (fallback to name match)'
+
+    email_detail_bits = []
+    if normalized_email:
+        email_detail_bits.append(f"<code>{normalized_email}</code>")
+    if email_auto_corrected:
+        email_detail_bits.append('auto-corrected domain')
+    if email_lookup_message and not email_in_ad:
+        email_detail_bits.append(email_lookup_message)
+    email_detail = ' | '.join(email_detail_bits)
+
+    email_line = f"<b>1) Email</b>: {email_result}"
+    if email_detail:
+        email_line += f" <span style='color:#666;'>{email_detail}</span>"
+
+    original_name = html.escape(str(metadata.get('original_name', '') or '').strip())
+    lookup_name_used = html.escape(str(metadata.get('lookup_name_used', '') or '').strip())
+    top_score = int(metadata.get('top_score', 0) or 0)
+    top_candidate_email = html.escape(str(metadata.get('top_candidate_email', '') or '').strip())
+    top_candidate_name = html.escape(str(metadata.get('top_candidate_name', '') or '').strip())
+    match_basis = html.escape(str(metadata.get('top_match_basis', '') or '').strip())
+    score_algo = str(metadata.get('score_algorithm', '') or '').strip()
+
+    if fuzzy_matches:
+        if score_algo == 'name_exact_normalized':
+            algo_label = 'Exact normalized match'
+        elif score_algo == 'name_fuzzy_token_sort_ratio':
+            algo_label = 'Fuzzy token_sort_ratio'
+        else:
+            algo_label = 'Name match'
+
+        name_bits = [f"{algo_label} = <b>{top_score}%</b>"]
+        if match_basis:
+            name_bits.append(f"Basis: {match_basis}")
+        if top_candidate_email:
+            name_bits.append(f"Top: {top_candidate_name} ({top_candidate_email})")
+        name_line = "<b>2) Name</b>: " + " | ".join(name_bits)
+        if lookup_name_used and lookup_name_used != original_name:
+            name_line += f"<br><span style='color:#666;'>Lookup override: {original_name} -&gt; {lookup_name_used}</span>"
+    else:
+        name_line = "<b>2) Name</b>: No candidates"
+
+    dept_level = int(metadata.get('top_candidate_dept_match_level', 0) or 0)
+    dept_label = _dept_match_level_label(dept_level)
+    dept_line = f"<b>3) Dept tie-break</b>: {dept_label} (does not change the % score)"
+
+    note_line = (
+        "<b>Note</b>: No weighting. Email is exact lookup only; % score comes from name matching "
+        "(token_sort_ratio) when email is missing/not in AD."
+    )
+
+    return (
+        "<details style='margin-top:8px;'>"
+        "<summary style='cursor:pointer; color:#333;'><b>Match breakdown (why this %?)</b></summary>"
+        "<div style='margin-top:6px; font-size:12px; line-height:1.6;'>"
+        f"{email_line}<br>{name_line}<br>{dept_line}<br>{note_line}"
+        "</div>"
+        "</details>"
+    )
+
+
+def _default_candidate_value(fuzzy_matches: List[Dict]) -> str:
+    """Default to top candidate only when score >= 90, else keep original."""
+    if not fuzzy_matches:
+        return 'KEEP_ORIGINAL'
+    top_score = int(fuzzy_matches[0].get('score', 0))
+    if top_score >= 90:
+        return str(fuzzy_matches[0].get('email', '')).strip().lower()
+    return 'KEEP_ORIGINAL'
+
+
+def _candidate_row_common(item: Dict, status: str, theme_color: str, title_prefix: str) -> Dict:
+    """Create candidate-selection row with keep-original default for <=89."""
+    metadata = item['metadata']
+    input_name = str(metadata.get('original_name', '') or '').strip() or '(blank)'
+    input_email = str(metadata.get('original_email', '') or '').strip() or '(blank)'
+    input_dept = str(metadata.get('original_department', '') or '').strip() or '(blank)'
+    preferred_name_html = _preferred_name_override_html(metadata)
+    fuzzy_matches = metadata.get('fuzzy_matches', [])
+    top_score = int(fuzzy_matches[0].get('score', 0)) if fuzzy_matches else 0
+    default_value = _default_candidate_value(fuzzy_matches)
+    keep_default = default_value == 'KEEP_ORIGINAL'
+
+    options = [
+        (f"Keep Original Email/Name (default for <= {LOW_CONFIDENCE_KEEP_THRESHOLD}%)", 'KEEP_ORIGINAL')
+    ]
+    for match in fuzzy_matches:
+        options.append((_candidate_option_label(match), match['email']))
+    options.append(('-- Manual Entry --', 'MANUAL'))
+
+    dropdown = widgets.Dropdown(
+        options=options,
+        value=default_value,
+        description='',
+        layout=widgets.Layout(width='100%')
+    )
+    txt_manual = widgets.Text(
+        placeholder='Enter email manually',
+        layout=widgets.Layout(width='100%'),
+        disabled=True
+    )
+
+    def on_dropdown_change(change):
+        if change['new'] == 'MANUAL':
+            txt_manual.disabled = False
+        else:
+            txt_manual.disabled = True
+            txt_manual.value = ''
+
+    dropdown.observe(on_dropdown_change, names='value')
+
+    hint = (
+        f"Top match: {top_score}% | {'Auto-selected (>=90)' if not keep_default else 'Default: Keep Original (<=89)'}"
+        if fuzzy_matches else 'No fuzzy suggestions available'
+    )
+    breakdown_html = _match_logic_breakdown_html(metadata, fuzzy_matches)
+    info_html = widgets.HTML(
+        value=f"""
+        <div style='padding:10px 12px; border:1px solid {theme_color}; background:#f8f9fb; border-radius:8px; width:100%; line-height:1.6;'>
+            <b style='color:{theme_color};'>{title_prefix}</b><br>
+            <b>Input Full Name:</b> {input_name}<br>
+            <b>Input Email:</b> {input_email}<br>
+            <b>Input Dept:</b> {input_dept}<br>
+            {preferred_name_html}
+            <small style='color:#666;'>{hint}</small>
+            {breakdown_html}
+        </div>
+        """,
+        layout=widgets.Layout(width='100%')
+    )
+    candidate_html = _candidate_detail_html(fuzzy_matches, theme_color)
+
+    controls_box = widgets.VBox([
+        widgets.HTML(value='<b>Select Match</b>'),
+        dropdown,
+        widgets.HTML(value='<b>Manual Email (only if needed)</b>'),
+        txt_manual
+    ], layout=widgets.Layout(width='100%'))
+
+    btn_delete = widgets.Button(
+        description='✕',
+        button_style='danger',
+        layout=widgets.Layout(width='44px', height='40px'),
+        tooltip='Remove this record'
+    )
+
+    action_row = widgets.HBox([
+        controls_box,
+        btn_delete
+    ], layout=widgets.Layout(align_items='flex-start', width='100%'))
+
+    row_widget = widgets.VBox([
+        info_html,
+        candidate_html,
+        action_row
+    ], layout=widgets.Layout(
+        border=f'1px solid {theme_color}',
+        padding='12px',
+        margin='8px 0',
+        width='100%'
+    ))
+
+    result = {
+        'row_type': 'candidate',
+        'source_status': status,
+        'item': item,
+        'metadata': metadata,
+        'dropdown': dropdown,
+        'manual_input': txt_manual,
+        'row': row_widget,
+        'top_score': top_score,
+        'deleted': False
+    }
+
+    def on_delete(_):
+        result['deleted'] = True
+        result['row'].layout.display = 'none'
+
+    btn_delete.on_click(on_delete)
+    return result
+
+
+def create_fuzzy_unique_row(item: Dict) -> Dict:
+    """Green row for single fuzzy match with selectable suggestions."""
+    return _candidate_row_common(
+        item=item,
+        status=ValidationStatus.INFO_FUZZY_UNIQUE,
+        theme_color='#34c759',
+        title_prefix='🔵 Single Match'
+    )
+
+
+def create_fuzzy_multiple_row(item: Dict) -> Dict:
+    """Orange row for multiple or low-confidence matches."""
+    return _candidate_row_common(
+        item=item,
+        status=ValidationStatus.ERR_FUZZY_MULTIPLE,
+        theme_color='#ff9500',
+        title_prefix='🟠 Candidate Review'
+    )
+
+
+def create_mismatch_row(item: Dict) -> Dict:
+    """Yellow row for name mismatch."""
+    metadata = item['metadata']
+    original_email = metadata.get('original_email', '')
+    original_name = metadata.get('original_name', '')
+    original_dept = metadata.get('original_department', '')
+    ad_user = metadata.get('ad_user', {})
+    preferred_name_html = _preferred_name_override_html(metadata)
+    fuzzy_matches = metadata.get('fuzzy_matches', [])
+    breakdown_html = _match_logic_breakdown_html(metadata, fuzzy_matches)
+
+    decision = widgets.Dropdown(
+        options=[
+            ('Use AD Name', 'AD_NAME'),
+            ('Keep Input Name', 'INPUT_NAME')
+        ],
+        value='AD_NAME',
+        layout=widgets.Layout(width='220px')
+    )
+
+    info_html = widgets.HTML(
+        value=f"""
+        <div style='padding:10px 12px; border:1px solid #ff9800; background:#fff3e0; border-radius:8px; width:100%; line-height:1.6;'>
+            <b style='color:#ff9800;'>⚠️ Name Mismatch</b><br>
+            <b>Input Full Name:</b> {original_name}<br>
+            <b>Input Dept:</b> {original_dept}<br>
+            {preferred_name_html}
+            <b>AD Full Name:</b> {ad_user.get('name', '(N/A)')}<br>
+            <b>Email:</b> {original_email}
+            {breakdown_html}
+        </div>
+        """,
+        layout=widgets.Layout(width='100%')
+    )
+
+    decision_box = widgets.VBox([
+        widgets.HTML(value='<b>Name Choice</b>'),
+        decision
+    ], layout=widgets.Layout(width='280px'))
+
+    btn_delete = widgets.Button(
+        description='✕',
+        button_style='danger',
+        layout=widgets.Layout(width='44px', height='40px'),
+        tooltip='Remove this record'
+    )
+
+    action_row = widgets.HBox([
+        decision_box,
+        btn_delete
+    ], layout=widgets.Layout(align_items='flex-start', width='100%'))
+
+    row_widget = widgets.VBox([
+        info_html,
+        action_row
+    ], layout=widgets.Layout(
+        border='1px solid #ffcc80',
+        padding='12px',
+        margin='8px 0',
+        width='100%'
+    ))
+
+    result = {
+        'row_type': 'mismatch',
+        'source_status': ValidationStatus.WARN_NAME_MISMATCH,
+        'item': item,
+        'metadata': metadata,
+        'decision': decision,
+        'row': row_widget,
+        'deleted': False
+    }
+
+    def on_delete(_):
+        result['deleted'] = True
+        result['row'].layout.display = 'none'
+
+    btn_delete.on_click(on_delete)
+    return result
+
+
+def create_readonly_error_row(item: Dict, theme_color: str = '#ef5350') -> Dict:
+    """Read-only card for no-match validation results."""
+    metadata = item['metadata']
+    input_name = str(metadata.get('original_name', '') or '').strip() or '(blank)'
+    input_email = str(metadata.get('original_email', '') or '').strip() or '(blank)'
+    input_dept = str(metadata.get('original_department', '') or '').strip() or '(blank)'
+    preferred_name_html = _preferred_name_override_html(metadata)
+    validation_message = str(metadata.get('validation_message', '') or ValidationStatus.get_display_text(item.get('status', '')))
+    fuzzy_matches = metadata.get('fuzzy_matches', [])
+    breakdown_html = _match_logic_breakdown_html(metadata, fuzzy_matches)
+
+    info_html = widgets.HTML(
+        value=f"""
+        <div style='padding:10px 12px; border:1px solid {theme_color}; background:#fff8f8; border-radius:8px; width:100%; line-height:1.6;'>
+            <b style='color:{theme_color};'>📄 No Match</b><br>
+            <b>Input Full Name:</b> {input_name}<br>
+            <b>Input Email:</b> {input_email}<br>
+            <b>Input Dept:</b> {input_dept}<br>
+            {preferred_name_html}
+            <b>Validation Message:</b> {validation_message}
+            {breakdown_html}
+        </div>
+        """,
+        layout=widgets.Layout(width='100%')
+    )
+
+    row_widget = widgets.VBox([
+        info_html
+    ], layout=widgets.Layout(
+        border=f'1px solid {theme_color}',
+        padding='12px',
+        margin='8px 0',
+        width='100%'
+    ))
+
+    return {
+        'row_type': 'readonly_error',
+        'item': item,
+        'row': row_widget
+    }
+
+
+def _build_scroll_section(rows: List[Dict]) -> widgets.VBox:
+    return widgets.VBox(
+        [r['row'] for r in rows],
+        layout=widgets.Layout(
+            border='1px solid #ddd',
+            padding='10px',
+            width='100%'
+        )
+    )
+
+
+def build_group_accordion(title: str, child_widget, open_by_default: bool = False) -> widgets.Accordion:
+    """Wrap a group in an accordion with a controlled default state."""
+    acc = widgets.Accordion(children=[child_widget])
+    acc.set_title(0, title)
+    acc.selected_index = 0 if open_by_default else None
+    return acc
+
+
+def build_stage2_output_path(input_filename: str, stage_dir: str) -> str:
+    """Build a unique Stage 2 output path to avoid overwrite and file-lock collisions."""
+    base_name = os.path.splitext(os.path.basename(str(input_filename or 'validated_output')))[0]
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    candidate = os.path.join(stage_dir, f"{base_name}_validated_{timestamp}.xlsx")
+    suffix = 1
+    while os.path.exists(candidate):
+        candidate = os.path.join(stage_dir, f"{base_name}_validated_{timestamp}_{suffix:02d}.xlsx")
+        suffix += 1
+    return candidate
+
+
+# ============================================
+# Main Validation Function
+# ============================================
+
+def do_validation(b):
+    """Validate uploaded file and build enhanced section-based review UI."""
+    global stage2_input_df, stage2_input_filename, stage2_categorized, stage2_ui_rows
+
+    s2_output.clear_output()
+
+    if not s2_upload.value:
+        with s2_output:
+            print("❌ Please upload a file")
+            print(f"📝 Troubleshooting log: {stage2_log_file}")
+        logger_s2.warning("Stage 2 validation blocked because no upload is selected")
+        return
+
+    b.disabled = True
+
+    try:
+        with s2_output:
+            print()
+            print("=" * 60)
+            print("🔍 Stage 2: Email/User Validation")
+            print("=" * 60)
+            print(f"📝 Troubleshooting log: {stage2_log_file}")
+            print()
+
+        stage2_input_filename, stage2_input_bytes = get_upload_file_payload(s2_upload.value, field_label="Stage 2 input")
+        logger_s2.info(f"Stage 2 validation triggered | file={stage2_input_filename} | size_bytes={len(stage2_input_bytes)}")
+        stage2_input_df = read_table_from_source(
+            stage2_input_filename,
+            stage2_input_bytes,
+            label="Stage 2 input",
+            logger=logger_s2,
+        )
+
+        with s2_output:
+            print(f"📄 Loaded: {stage2_input_filename}")
+            print(f"   Rows: {len(stage2_input_df)}")
+            print(f"   Columns: {list(stage2_input_df.columns)}")
+            print()
+
+        logger_s2.info(
+            f"Stage 2 input ready | file={stage2_input_filename} | rows={len(stage2_input_df)} | columns={list(stage2_input_df.columns)}"
+        )
+
+        preferred_name_ok, preferred_name_msg = load_preferred_name_changes()
+
+        with s2_output:
+            if preferred_name_ok:
+                print(f"📝 {preferred_name_msg}")
+            else:
+                print(f"⚠️ {preferred_name_msg}")
+            print()
+
+        stage2_categorized = {}
+        total_rows = len(stage2_input_df)
+        if total_rows == 0:
+            raise ValueError(f"Stage 2 input '{stage2_input_filename}' loaded successfully but contains 0 rows")
+        progress = widgets.IntProgress(
+            value=0,
+            min=0,
+            max=max(total_rows, 1),
+            description='Processing:',
+            bar_style='info',
+            layout=widgets.Layout(width='680px')
+        )
+        progress_text = widgets.HTML(
+            value=f"<span style='font-size:12px; color:#555;'>0 / {total_rows} (0%)</span>"
+        )
+        started_at = datetime.now()
+
+        with s2_output:
+            display(widgets.VBox([progress, progress_text]))
+
+        update_every = 20 if total_rows >= 1000 else 10 if total_rows >= 300 else 5
+
+        for i, (idx, row) in enumerate(stage2_input_df.iterrows(), start=1):
+            status, metadata = categorize_user(row, stage2_ad_cache, stage2_name_index)
+            stage2_categorized.setdefault(status, []).append({
+                'index': idx,
+                'row': row,
+                'metadata': metadata,
+                'status': status
+            })
+
+            if status != ValidationStatus.VALID_PERFECT:
+                logger_s2.debug(
+                    "Stage 2 row categorized | index=%s | status=%s | original_email=%r | normalized_email=%r | "
+                    "email_valid=%s | email_auto_corrected=%s | email_in_ad=%s | fallback_from_email=%s | "
+                    "original_name=%r | lookup_name_used=%r | original_dept=%r | score_algorithm=%s | "
+                    "top_score=%s | top_candidate_email=%r | top_dept_match_level=%s | message=%r",
+                    idx,
+                    status,
+                    metadata.get('original_email'),
+                    metadata.get('normalized_email'),
+                    metadata.get('email_valid'),
+                    metadata.get('email_auto_corrected'),
+                    metadata.get('email_in_ad'),
+                    metadata.get('fallback_from_email'),
+                    metadata.get('original_name'),
+                    metadata.get('lookup_name_used'),
+                    metadata.get('original_department'),
+                    metadata.get('score_algorithm'),
+                    metadata.get('top_score'),
+                    metadata.get('top_candidate_email'),
+                    metadata.get('top_candidate_dept_match_level'),
+                    metadata.get('validation_message'),
+                )
+
+            if i == 1 or i == total_rows or i % update_every == 0:
+                progress.value = i
+                pct = int((i / total_rows) * 100) if total_rows else 100
+                progress_text.value = (
+                    f"<span style='font-size:12px; color:#555;'>"
+                    f"{i} / {total_rows} ({pct}%)"
+                    f"</span>"
+                )
+
+        elapsed_sec = (datetime.now() - started_at).total_seconds()
+        progress.value = total_rows if total_rows else 1
+        progress.bar_style = 'success'
+        progress.description = 'Done:'
+        done_pct = 100 if total_rows else 0
+        progress_text.value = (
+            f"<span style='font-size:12px; color:#1b5e20;'>"
+            f"{total_rows} / {total_rows} ({done_pct}%) - Completed in {elapsed_sec:.1f}s"
+            f"</span>"
+        )
+
+        stats = {status: len(stage2_categorized.get(status, [])) for status in [
+            ValidationStatus.VALID_PERFECT,
+            ValidationStatus.WARN_NAME_MISMATCH,
+            ValidationStatus.INFO_FUZZY_UNIQUE,
+            ValidationStatus.ERR_FUZZY_MULTIPLE,
+            ValidationStatus.ERR_NOT_FOUND,
+            ValidationStatus.ERR_EMAIL_INVALID,
+            ValidationStatus.ERR_MISSING_DATA
+        ]}
+
+        candidate_items = (
+            stage2_categorized.get(ValidationStatus.INFO_FUZZY_UNIQUE, []) +
+            stage2_categorized.get(ValidationStatus.ERR_FUZZY_MULTIPLE, [])
+        )
+        preselect_90 = sum(
+            1 for it in candidate_items
+            if it['metadata'].get('fuzzy_matches') and it['metadata']['fuzzy_matches'][0].get('score', 0) >= 90
+        )
+
+        keep_original_default = max(0, len(candidate_items) - preselect_90)
+        auto_corrected_count = sum(
+            1 for it in stage2_categorized.get(ValidationStatus.VALID_PERFECT, [])
+            if it.get('metadata', {}).get('email_auto_corrected')
+        )
+        fallback_from_email_count = sum(
+            1 for it in candidate_items
+            if it.get('metadata', {}).get('fallback_from_email')
+        )
+        name_exact_count = sum(
+            1 for it in candidate_items
+            if it.get('metadata', {}).get('score_algorithm') == 'name_exact_normalized'
+        )
+        name_fuzzy_count = sum(
+            1 for it in candidate_items
+            if it.get('metadata', {}).get('score_algorithm') == 'name_fuzzy_token_sort_ratio'
+        )
+
+        with s2_output:
+            print("📊 Group Summary:")
+            print(f"   G0 AUTO_100:               {stats[ValidationStatus.VALID_PERFECT]}")
+            print(f"   G1 REVIEW_90_PLUS:         {preselect_90}")
+            print(f"   G2 REVIEW_89_OR_LESS:      {keep_original_default}")
+            print(f"   G3 REVIEW_NAME_MISMATCH:   {stats[ValidationStatus.WARN_NAME_MISMATCH]}")
+            print(f"   G4 REVIEW_NO_MATCH:        {stats[ValidationStatus.ERR_NOT_FOUND] + stats[ValidationStatus.ERR_EMAIL_INVALID]}")
+            print(f"   G5 REVIEW_MISSING_INPUT:   {stats[ValidationStatus.ERR_MISSING_DATA]}")
+            print(f"   AUTO_CORRECTED_DOMAIN:     {auto_corrected_count}")
+            print(f"   TOTAL: {len(stage2_input_df)}")
+            print()
+
+        logger_s2.info(
+            f"Stage 2 summary | total={len(stage2_input_df)} | auto_100={stats[ValidationStatus.VALID_PERFECT]} | review_90_plus={preselect_90} | review_89_or_less={keep_original_default} | mismatch={stats[ValidationStatus.WARN_NAME_MISMATCH]} | no_match={stats[ValidationStatus.ERR_NOT_FOUND] + stats[ValidationStatus.ERR_EMAIL_INVALID]} | missing={stats[ValidationStatus.ERR_MISSING_DATA]}"
+        )
+        logger_s2.info(
+            f"Stage 2 diagnostics | candidate_rows={len(candidate_items)} | fallback_from_email={fallback_from_email_count} | name_exact={name_exact_count} | name_fuzzy={name_fuzzy_count} | auto_corrected_domain={auto_corrected_count}"
+        )
+
+        ui_sections = []
+        stage2_ui_rows = {
+            'fuzzy_unique': [],
+            'fuzzy_multiple': [],
+            'mismatch': [],
+        }
+        g1_rows = []
+        g2_rows = []
+        g3_rows = []
+        g4_rows = []
+        g4_count = stats[ValidationStatus.ERR_NOT_FOUND] + stats[ValidationStatus.ERR_EMAIL_INVALID]
+
+        summary_html = f"""
+        <div style='background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    padding: 18px; border-radius: 8px; color: white; margin-bottom: 16px;'>
+            <h2 style='margin: 0 0 8px 0;'>🔍 Validation Groups (Enhanced UI)</h2>
+            <div style='display:grid; grid-template-columns:repeat(3, 1fr); gap:10px; font-size:13px;'>
+                <div>G0 Auto 100%: <b>{stats[ValidationStatus.VALID_PERFECT]}</b></div>
+                <div>G1 Review 90%+: <b>{preselect_90}</b></div>
+                <div>G2 Review 89% or less: <b>{keep_original_default}</b></div>
+                <div>G3 Name Mismatch: <b>{stats[ValidationStatus.WARN_NAME_MISMATCH]}</b></div>
+                <div>G4 No Match: <b>{stats[ValidationStatus.ERR_NOT_FOUND] + stats[ValidationStatus.ERR_EMAIL_INVALID]}</b></div>
+                <div>G5 Missing Input: <b>{stats[ValidationStatus.ERR_MISSING_DATA]}</b></div>
+                <div>Email domain auto-corrected: <b>{auto_corrected_count}</b></div>
+            </div>
+        </div>
+        """
+        ui_sections.append(widgets.HTML(value=summary_html))
+
+        if preferred_name_ok:
+            if stage2_preferred_name_map:
+                preferred_name_notice_html = (
+                    "<div style='padding:10px 12px; font-size:13px; color:#0b4f6c; "
+                    "background:#eef8ff; border:1px solid #b6e0fe; border-radius:6px; margin-bottom:14px;'>"
+                    f"📝 Preferred-name overrides active: {len(stage2_preferred_name_map)} row(s) loaded from "
+                    f"<code>{os.path.basename(PREFERRED_NAME_CHANGE_FILE)}</code>."
+                    "</div>"
+                )
+            else:
+                preferred_name_notice_html = (
+                    "<div style='padding:10px 12px; font-size:13px; color:#455a64; "
+                    "background:#f5f7fa; border:1px solid #dfe5ec; border-radius:6px; margin-bottom:14px;'>"
+                    f"ℹ️ Preferred-name override file not loaded. Using input names as-is."
+                    "</div>"
+                )
+        else:
+            preferred_name_notice_html = (
+                "<div style='padding:10px 12px; font-size:13px; color:#8a4b08; "
+                "background:#fff7e6; border:1px solid #ffd591; border-radius:6px; margin-bottom:14px;'>"
+                f"⚠️ Preferred-name overrides disabled: {preferred_name_msg}"
+                "</div>"
+            )
+        ui_sections.append(widgets.HTML(value=preferred_name_notice_html))
+
+        for item in stage2_categorized.get(ValidationStatus.INFO_FUZZY_UNIQUE, []):
+            row_ui = create_fuzzy_unique_row(item)
+            stage2_ui_rows['fuzzy_unique'].append(row_ui)
+            if int(row_ui.get('top_score', 0)) >= 90:
+                g1_rows.append(row_ui)
+            else:
+                g2_rows.append(row_ui)
+
+        for item in stage2_categorized.get(ValidationStatus.ERR_FUZZY_MULTIPLE, []):
+            row_ui = create_fuzzy_multiple_row(item)
+            stage2_ui_rows['fuzzy_multiple'].append(row_ui)
+            if int(row_ui.get('top_score', 0)) >= 90:
+                g1_rows.append(row_ui)
+            else:
+                g2_rows.append(row_ui)
+
+        for item in stage2_categorized.get(ValidationStatus.WARN_NAME_MISMATCH, []):
+            row_ui = create_mismatch_row(item)
+            stage2_ui_rows['mismatch'].append(row_ui)
+            g3_rows.append(row_ui)
+
+        for status in [ValidationStatus.ERR_NOT_FOUND, ValidationStatus.ERR_EMAIL_INVALID]:
+            for item in stage2_categorized.get(status, []):
+                g4_rows.append(create_readonly_error_row(item))
+
+        summary_only_html = (
+            "<div style='padding:10px 12px; font-size:13px; color:#2e7d32; "
+            "background:#f1f8e9; border:1px solid #c8e6c9; border-radius:6px;'>"
+            f"✅ {stats[ValidationStatus.VALID_PERFECT]} perfect-match records are auto-resolved and hidden."
+            "<br>These records are still included in the final output file."
+            f"<br>Domain auto-correction applied when needed: {auto_corrected_count} record(s)."
+            "</div>"
+        )
+        ui_sections.append(build_group_accordion(
+            f"✅ G0 Auto 100% ({stats[ValidationStatus.VALID_PERFECT]} records — hidden)",
+            widgets.HTML(value=summary_only_html),
+            open_by_default=False
+        ))
+
+        g1_intro = widgets.HTML(value=f"""
+            <div style='padding:10px 12px; font-size:12px; color:#1b5e20; background:#edf7ed; border:1px solid #cde7cd; border-radius:6px;'>
+                Top score is <b>90% or higher</b>. Rows stay available for review but are folded by default.
+            </div>
+        """)
+        g1_body = widgets.VBox([
+            g1_intro,
+            _build_scroll_section(g1_rows) if g1_rows else widgets.HTML(value="<div style='padding:10px 12px; color:#666;'>No rows in G1 for this run.</div>")
+        ], layout=widgets.Layout(width='100%'))
+        ui_sections.append(build_group_accordion(
+            f"🟢 G1 Review 90%+ ({preselect_90})",
+            g1_body,
+            open_by_default=False
+        ))
+
+        ui_sections.append(widgets.HTML(value=f"""
+            <h3 style='color:#ff9500; border-bottom:2px solid #ff9500; padding-bottom:6px; margin-top:22px;'>
+                🟠 G2 Review 89% or less ({keep_original_default})
+            </h3>
+            <p style='font-size:12px; color:#555; margin-top:6px;'>
+                Default remains original when top score <= {LOW_CONFIDENCE_KEEP_THRESHOLD}. Suggestions are optional.
+            </p>
+        """))
+        if g2_rows:
+            ui_sections.append(_build_scroll_section(g2_rows))
+        else:
+            ui_sections.append(widgets.HTML(value="<div style='padding:10px 12px; border:1px solid #dcdfe4; border-radius:6px; color:#666;'>No rows in G2 for this run.</div>"))
+
+        g3_body = widgets.VBox([
+            widgets.HTML(value="<div style='padding:10px 12px; font-size:12px; color:#8a4b08; background:#fff7e6; border:1px solid #ffd591; border-radius:6px;'>Choose whether to keep the AD full name or preserve the input full name.</div>"),
+            _build_scroll_section(g3_rows) if g3_rows else widgets.HTML(value="<div style='padding:10px 12px; color:#666;'>No rows in G3 for this run.</div>")
+        ], layout=widgets.Layout(width='100%'))
+        ui_sections.append(build_group_accordion(
+            f"⚠️ G3 Name Mismatch ({stats[ValidationStatus.WARN_NAME_MISMATCH]})",
+            g3_body,
+            open_by_default=False
+        ))
+
+        g4_body = widgets.VBox([
+            widgets.HTML(value="<div style='padding:10px 12px; font-size:12px; color:#8a1f17; background:#fff1f0; border:1px solid #ffccc7; border-radius:6px;'>These rows are exported automatically as unresolved. This section is for review only.</div>"),
+            _build_scroll_section(g4_rows) if g4_rows else widgets.HTML(value="<div style='padding:10px 12px; color:#666;'>No rows in G4 for this run.</div>")
+        ], layout=widgets.Layout(width='100%'))
+        ui_sections.append(build_group_accordion(
+            f"📄 G4 No Match ({g4_count})",
+            g4_body,
+            open_by_default=False
+        ))
+
+        info_html = f"""
+        <div style='margin-top:16px; font-size:13px; color:#444;'>
+            <b>Auto-export unresolved buckets:</b>
+            Not Found={stats[ValidationStatus.ERR_NOT_FOUND]},
+            Email Invalid={stats[ValidationStatus.ERR_EMAIL_INVALID]},
+            Missing Data={stats[ValidationStatus.ERR_MISSING_DATA]}.
+            <br>
+            Email domain auto-correction rule:
+            <code>{APPLE_BANK_WRONG_DOMAIN}</code> -> <code>{APPLE_BANK_CORRECT_DOMAIN}</code>.
+        </div>
+        """
+        ui_sections.append(widgets.HTML(value=info_html))
+
+        ui_sections.append(widgets.HTML(value="<hr style='margin: 20px 0;'>"))
+        ui_sections.append(widgets.HBox([s2_btn_save]))
+
+        with s2_output:
+            display(widgets.VBox(ui_sections))
+
+        s2_btn_save.disabled = False
+        s2_status.value = "<span style='color:green;'>✅ Validation complete</span>"
+        logger_s2.info("Stage 2 validation completed successfully")
+
+    except Exception as e:
+        with s2_output:
+            print()
+            print(f"❌ Error: {str(e)}")
+            print(f"📝 Troubleshooting log: {stage2_log_file}")
+        logger_s2.error(f"Stage 2 validation error: {str(e)}", exc_info=True)
+        s2_status.value = f"<span style='color:red;'>❌ Error: {str(e)}</span>"
+    finally:
+        b.disabled = False
+
+
+# ============================================
+# Save Function
+# ============================================
+
+def do_save(b):
+    """Save validated file with unresolved rows included."""
+    if stage2_input_df is None:
+        with s2_output:
+            print("❌ No data to save")
+            print(f"📝 Troubleshooting log: {stage2_log_file}")
+        return
+
+    if not stage2_categorized:
+        with s2_output:
+            print("❌ No validation results found. Click Validate before Save.")
+            print(f"📝 Troubleshooting log: {stage2_log_file}")
+        logger_s2.warning("Stage 2 save blocked because stage2_categorized is empty")
+        return
+
+    b.disabled = True
+
+    try:
+        def _log(message: str = ""):
+            with s2_output:
+                print(message)
+
+        _log()
+        _log("💾 Saving validated file...")
+        _log(f"📝 Troubleshooting log: {stage2_log_file}")
+        logger_s2.info(
+            f"Stage 2 save triggered | input_file={stage2_input_filename} | input_rows={len(stage2_input_df)} | statuses={list(stage2_categorized.keys())}"
+        )
+
+        validated_rows = []
+        unresolved_count = 0
+        kept_original_count = 0
+        deleted_count = 0
+
+        def _ad_fields(email_key):
+            if email_key and email_key in stage2_ad_cache:
+                ad = stage2_ad_cache[email_key]
+                return ad.get('dept', ''), 'Yes' if ad.get('active') else 'No'
+            return '', ''
+
+        for item in stage2_categorized.get(ValidationStatus.VALID_PERFECT, []):
+            row_data = item['row'].to_dict()
+            metadata = item['metadata']
+            row_data['Email'] = metadata['final_email']
+            row_data['User Name'] = metadata['final_name']
+            row_data['Department'], row_data['is_AD_active'] = _ad_fields(metadata['final_email'])
+            row_data['Validation Status'] = ValidationStatus.get_display_text(ValidationStatus.VALID_PERFECT)
+            validated_rows.append(row_data)
+
+        candidate_rows = stage2_ui_rows.get('fuzzy_unique', []) + stage2_ui_rows.get('fuzzy_multiple', [])
+        for row_ui in candidate_rows:
+            if row_ui.get('deleted'):
+                deleted_count += 1
+                logger_s2.debug(
+                    "Stage 2 save row skipped (deleted) | index=%s | original_email=%r | original_name=%r",
+                    row_ui.get('item', {}).get('index'),
+                    row_ui.get('metadata', {}).get('original_email'),
+                    row_ui.get('metadata', {}).get('original_name'),
+                )
+                continue
+
+            item = row_ui['item']
+            row_data = item['row'].to_dict()
+            metadata = row_ui['metadata']
+            row_index = item.get('index')
+
+            selected = str(row_ui['dropdown'].value or '').strip()
+            is_manual = selected == 'MANUAL'
+            is_keep_original = selected in ['', 'KEEP_ORIGINAL']
+
+            logger_s2.debug(
+                "Stage 2 save row selection | index=%s | selected=%r | top_score=%s | original_email=%r | original_name=%r",
+                row_index,
+                selected,
+                row_ui.get('top_score'),
+                metadata.get('original_email'),
+                metadata.get('original_name'),
+            )
+
+            if is_manual:
+                selected_email = row_ui['manual_input'].value.strip().lower()
+                if not selected_email:
+                    row_data['Email'] = metadata.get('original_email', row_data.get('Email', ''))
+                    row_data['User Name'] = metadata.get('original_name', row_data.get('User Name', ''))
+                    row_data['Department'] = ''
+                    row_data['is_AD_active'] = ''
+                    row_data['Validation Status'] = "⚠️ Unresolved (Manual Entry Empty, Kept Original)"
+                    unresolved_count += 1
+                    logger_s2.debug(
+                        "Stage 2 save row unresolved manual (empty) | index=%s | original_email=%r | original_name=%r",
+                        row_index,
+                        metadata.get('original_email'),
+                        metadata.get('original_name'),
+                    )
+                    validated_rows.append(row_data)
+                    continue
+            elif is_keep_original:
+                selected_email = ''
+            else:
+                selected_email = selected.lower()
+
+            if not selected_email:
+                row_data['Email'] = metadata.get('original_email', row_data.get('Email', ''))
+                row_data['User Name'] = metadata.get('original_name', row_data.get('User Name', ''))
+                row_data['Department'] = ''
+                row_data['is_AD_active'] = ''
+                if int(row_ui.get('top_score', 0)) <= LOW_CONFIDENCE_KEEP_THRESHOLD:
+                    row_data['Validation Status'] = f"⚠️ Kept Original (Top Match <= {LOW_CONFIDENCE_KEEP_THRESHOLD}%)"
+                else:
+                    row_data['Validation Status'] = "⚠️ Kept Original (User Choice)"
+                logger_s2.debug(
+                    "Stage 2 save row kept original | index=%s | top_score=%s | status=%r | original_email=%r | original_name=%r",
+                    row_index,
+                    row_ui.get('top_score'),
+                    row_data.get('Validation Status'),
+                    metadata.get('original_email'),
+                    metadata.get('original_name'),
+                )
+                kept_original_count += 1
+                validated_rows.append(row_data)
+                continue
+
+            matched = None
+            for m in metadata.get('fuzzy_matches', []):
+                if m['email'] == selected_email:
+                    matched = m
+                    break
+
+            row_data['Email'] = selected_email
+
+            if matched:
+                row_data['User Name'] = matched['name']
+            elif selected_email in stage2_ad_cache:
+                row_data['User Name'] = stage2_ad_cache[selected_email]['name']
+
+            row_data['Department'], row_data['is_AD_active'] = _ad_fields(selected_email)
+
+            if is_manual:
+                row_data['Validation Status'] = "🔧 Manually Resolved"
+            else:
+                if row_ui['source_status'] == ValidationStatus.INFO_FUZZY_UNIQUE:
+                    row_data['Validation Status'] = "✅ Candidate Selected"
+                else:
+                    row_data['Validation Status'] = ValidationStatus.get_display_text(ValidationStatus.ERR_FUZZY_MULTIPLE)
+
+            logger_s2.debug(
+                "Stage 2 save row resolved | index=%s | method=%s | selected_email=%r | final_name=%r | dept=%r | ad_active=%r | status=%r | top_score=%s",
+                row_index,
+                'manual' if is_manual else 'candidate',
+                selected_email,
+                row_data.get('User Name'),
+                row_data.get('Department'),
+                row_data.get('is_AD_active'),
+                row_data.get('Validation Status'),
+                row_ui.get('top_score'),
+            )
+
+            validated_rows.append(row_data)
+
+        for row_ui in stage2_ui_rows.get('mismatch', []):
+            if row_ui.get('deleted'):
+                deleted_count += 1
+                continue
+            if row_ui['row_type'] == 'mismatch':
+                decision = row_ui['decision'].value
+                item = row_ui['item']
+                row_data = item['row'].to_dict()
+                metadata = row_ui['metadata']
+                row_data['Email'] = metadata['final_email']
+
+                if decision == 'AD_NAME':
+                    row_data['User Name'] = metadata['final_name']
+                    row_data['Validation Status'] = "✅ Name Mismatch Resolved (AD Name)"
+                else:
+                    row_data['User Name'] = metadata['original_name']
+                    row_data['Validation Status'] = "⚠️ Name Mismatch (Kept Original)"
+
+                logger_s2.debug(
+                    "Stage 2 save mismatch resolved | index=%s | decision=%s | final_email=%r | final_name=%r | status=%r | original_name=%r",
+                    item.get('index'),
+                    decision,
+                    row_data.get('Email'),
+                    row_data.get('User Name'),
+                    row_data.get('Validation Status'),
+                    metadata.get('original_name'),
+                )
+
+                row_data['Department'], row_data['is_AD_active'] = _ad_fields(metadata['final_email'])
+                validated_rows.append(row_data)
+
+        for status in [ValidationStatus.ERR_NOT_FOUND, ValidationStatus.ERR_EMAIL_INVALID, ValidationStatus.ERR_MISSING_DATA]:
+            for item in stage2_categorized.get(status, []):
+                row_data = item['row'].to_dict()
+                row_data['Department'] = ''
+                row_data['is_AD_active'] = ''
+                row_data['Validation Status'] = ValidationStatus.get_display_text(status)
+                logger_s2.debug(
+                    "Stage 2 save unresolved export | index=%s | status=%s | original_email=%r | original_name=%r | message=%r",
+                    item.get('index'),
+                    status,
+                    item.get('metadata', {}).get('original_email'),
+                    item.get('metadata', {}).get('original_name'),
+                    item.get('metadata', {}).get('validation_message'),
+                )
+                validated_rows.append(row_data)
+
+        if kept_original_count > 0:
+            _log(f"📝 {kept_original_count} rows kept original Email/Name")
+        if unresolved_count > 0:
+            _log(f"⚠️  {unresolved_count} rows had unresolved manual input - kept original")
+        if deleted_count > 0:
+            _log(f"🗑️  {deleted_count} rows deleted by user - excluded from output")
+
+        output_df = pd.DataFrame(validated_rows)
+        if output_df.empty:
+            raise ValueError("No rows available to save after applying the current Stage 2 selections")
+        priority_cols = ['Validation Status', 'Email', 'User Name', 'Department', 'is_AD_active']
+        other_cols = [c for c in output_df.columns if c not in priority_cols]
+        cols = [c for c in priority_cols + other_cols if c in output_df.columns]
+        output_df = output_df[cols]
+
+        output_path = build_stage2_output_path(stage2_input_filename, STAGE2_DIR)
+        output_filename = os.path.basename(output_path)
+        logger_s2.info(
+            f"Stage 2 save prepared | output_file={output_filename} | output_path={output_path} | kept_original={kept_original_count} | unresolved_manual={unresolved_count} | deleted={deleted_count} | output_rows={len(output_df)}"
+        )
+
+        output_df.to_excel(output_path, index=False, sheet_name='Validated')
+
+        _log()
+        _log(f"✅ Saved: {output_path}")
+        _log(f"   Rows: {len(output_df)}")
+        _log(f"   Columns: {list(output_df.columns)}")
+        logger_s2.info(f"Stage 2 save success | output_path={output_path}")
+
+        s2_status.value = f"<span style='color:blue;'>✅ Saved: {output_filename}</span>"
+
+    except PermissionError as e:
+        logger_s2.error(f"Stage 2 save permission error: {str(e)}", exc_info=True)
+        with s2_output:
+            print()
+            print(f"❌ Save error: {str(e)}")
+            print("💡 The output file may be open in Excel, OneDrive, or another process.")
+            print(f"📝 Troubleshooting log: {stage2_log_file}")
+        s2_status.value = f"<span style='color:red;'>❌ Save error: {str(e)}</span>"
+    except Exception as e:
+        logger_s2.error(f"Stage 2 save error: {str(e)}", exc_info=True)
+        with s2_output:
+            print()
+            print(f"❌ Save error: {str(e)}")
+            print(f"📝 Troubleshooting log: {stage2_log_file}")
+        s2_status.value = f"<span style='color:red;'>❌ Error: {str(e)}</span>"
+    finally:
+        b.disabled = False
+
+
+# ============================================
+# UI Setup
+# ============================================
+
+s2_upload = widgets.FileUpload(
+    accept='.xlsx, .csv',
+    description="Upload File",
+    button_style='info'
+)
+s2_upload_status = widgets.HTML(value="<i>No file selected</i>")
+s2_btn_validate = widgets.Button(
+    description="🔍 Validate",
+    button_style='warning',
+    layout=widgets.Layout(width='140px', height='40px'),
+    disabled=True
+)
+s2_btn_save = widgets.Button(
+    description="💾 Save",
+    button_style='success',
+    layout=widgets.Layout(width='140px', height='40px'),
+    disabled=True
+)
+s2_status = widgets.HTML(value="<i>Loading AD cache...</i>")
+s2_output = widgets.Output()
+
+# Event handlers
+def on_upload_change(change):
+    item = get_upload_file_item(s2_upload.value)
+    if item:
+        fname = str(item.get('name') or item.get('metadata', {}).get('name') or 'unknown')
+        s2_upload_status.value = f"<b style='color:green;'>✅ {fname}</b>"
+        s2_btn_validate.disabled = False
+        logger_s2.info(f"Stage 2 upload selected | file={fname}")
+    else:
+        s2_upload_status.value = "<i>No file selected</i>"
+        s2_btn_validate.disabled = True
+
+s2_upload.observe(on_upload_change, 'value')
+s2_btn_validate.on_click(do_validation)
+s2_btn_save.on_click(do_save)
+
+# Initialize
+success, msg = load_ad_cache()
+if success:
+    s2_status.value = f"<span style='color:green;'>✅ {msg}</span>"
+else:
+    s2_status.value = f"<span style='color:red;'>⚠️ {msg}</span>"
+
+# Main UI
+stage2_ui = widgets.VBox([
+    widgets.HTML("""
+        <div style='background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+                    padding: 20px; border-radius: 8px; color: white; margin-bottom: 20px;'>
+            <h2 style='margin: 0 0 10px 0;'>🔍 Stage 2: Email/User Validation</h2>
+            <p style='margin: 0;'>Upload user list, validate against AD, resolve mismatches</p>
+        </div>
+    """),
+    widgets.HBox([s2_upload, s2_upload_status]),
+    widgets.HBox([s2_btn_validate, s2_btn_save]),
+    s2_status,
+    s2_output
+])
+
+clear_output()
+display(stage2_ui)
+
+print("="*60)
+print("Stage 2 UI Ready")
+print("="*60)
