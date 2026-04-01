@@ -409,17 +409,141 @@ s6_btn_scan.on_click(on_s6_scan)
 
 _r6_widget_store = {}
 
+def _r6_compute_overall_progress(stats_df, raw_df):
+    folder_map = raw_df.groupby(["Category", "App_Name", "reviewer"]).agg(
+        folder_url=("folder_url", "first"),
+    ).reset_index()
+
+    merged = stats_df.merge(folder_map, on=["Category", "App_Name", "reviewer"], how="left")
+
+    total_app_reviewers = int(len(merged))
+    pending_app_reviewers = int((merged["missing"] > 0).sum()) if total_app_reviewers else 0
+    done_app_reviewers = total_app_reviewers - pending_app_reviewers
+    progress_pct = round(done_app_reviewers / total_app_reviewers * 100, 1) if total_app_reviewers else 0.0
+    distinct_reviewers_to_notify = int(merged.loc[merged["missing"] > 0, "reviewer"].nunique()) if total_app_reviewers else 0
+
+    remaining = merged[merged["missing"] > 0].copy()
+    if not remaining.empty:
+        denom = remaining["total_rows"].replace(0, pd.NA)
+        remaining["Completion %"] = (((remaining["total_rows"] - remaining["missing"]) / denom) * 100).round(1).fillna(0.0)
+        remaining = remaining.rename(columns={
+            "App_Name": "App Name",
+            "reviewer": "Reviewer",
+            "missing": "Missing",
+            "total_rows": "Total Rows",
+            "folder_url": "Folder URL",
+        })
+        remaining = remaining[["Category", "App Name", "Reviewer", "Missing", "Total Rows", "Completion %", "Folder URL"]]
+        remaining = remaining.sort_values(["Missing", "Category", "App Name", "Reviewer"], ascending=[False, True, True, True])
+    else:
+        remaining = pd.DataFrame(columns=["Category", "App Name", "Reviewer", "Missing", "Total Rows", "Completion %", "Folder URL"])
+
+    overview_df = pd.DataFrame([
+        {"Metric": "Total app-reviewers", "Value": total_app_reviewers},
+        {"Metric": "Pending app-reviewers", "Value": pending_app_reviewers},
+        {"Metric": "Done app-reviewers", "Value": done_app_reviewers},
+        {"Metric": "Overall progress (%)", "Value": progress_pct},
+        {"Metric": "Distinct reviewers to notify", "Value": distinct_reviewers_to_notify},
+    ])
+
+    return {
+        "total_app_reviewers": total_app_reviewers,
+        "pending_app_reviewers": pending_app_reviewers,
+        "done_app_reviewers": done_app_reviewers,
+        "progress_pct": progress_pct,
+        "distinct_reviewers_to_notify": distinct_reviewers_to_notify,
+        "overview_df": overview_df,
+        "remaining_work_df": remaining,
+    }
+
+def _r6_remaining_work_html(remaining_df):
+    if remaining_df is None or remaining_df.empty:
+        return "<i>✅ No pending app-reviewers. All done.</i>"
+
+    cell_style = "padding:6px; overflow-wrap:anywhere; word-break:break-word; white-space:normal; vertical-align:middle"
+    table = (
+        "<div style='width:100%; overflow:auto'>"
+        "<table border='1' style='margin:0 auto; border-collapse:collapse; width:96%; font-size:12px; "
+        "border:1px solid #d8dde6; table-layout:fixed'>"
+    )
+    table += (
+        "<tr style='background:#eef3f8; font-weight:bold'>"
+        "<th style='padding:6px; width:18%; vertical-align:middle'>Quarter</th>"
+        "<th style='padding:6px; width:24%; vertical-align:middle'>App Name</th>"
+        "<th style='padding:6px; width:20%; vertical-align:middle'>Reviewer</th>"
+        "<th style='padding:6px; width:10%; vertical-align:middle'>Missing</th>"
+        "<th style='padding:6px; width:10%; vertical-align:middle'>Total</th>"
+        "<th style='padding:6px; width:10%; vertical-align:middle'>Completion %</th>"
+        "<th style='padding:6px; width:8%; vertical-align:middle'>Link</th>"
+        "</tr>"
+    )
+    for _, r in remaining_df.iterrows():
+        url = r.get("Folder URL") or "#"
+        link_html = (
+            f"<a href='{url}' target='_blank' rel='noopener noreferrer' "
+            "style='background:#0078d4;color:#fff;padding:6px 10px;border-radius:6px;"
+            "text-decoration:none;display:inline-block;white-space:nowrap'>Open Folder</a>"
+        )
+        table += (
+            "<tr>"
+            f"<td style='{cell_style}'>{r.get('Category', '')}</td>"
+            f"<td style='{cell_style}'>{r.get('App Name', '')}</td>"
+            f"<td style='{cell_style}'>{r.get('Reviewer', '')}</td>"
+            f"<td style='padding:6px; text-align:center; vertical-align:middle'>{int(r.get('Missing', 0))}</td>"
+            f"<td style='padding:6px; text-align:center; vertical-align:middle'>{int(r.get('Total Rows', 0))}</td>"
+            f"<td style='padding:6px; text-align:center; vertical-align:middle'>{r.get('Completion %', 0)}</td>"
+            f"<td style='padding:6px; text-align:center; vertical-align:middle'>{link_html}</td>"
+            "</tr>"
+        )
+    table += "</table></div>"
+    return table
+
 def _build_r6_dashboard():
     df = globals().get("r6_df")
     if df is None or df.empty:
         s6_dashboard.children = [widgets.HTML("<h4>No data found</h4>")]
         return
     stats = df.groupby(["Category", "App_Name", "reviewer"]).agg(
+        total_rows=("reviewer", "size"),
         missing=("is_missing", "sum"),
         approved=("stats_appr", "sum"), denied=("stats_deny", "sum"),
         changed=("stats_chg", "sum"),
         is_cached=("source_is_cache", "all"),
     ).reset_index()
+
+    prog = _r6_compute_overall_progress(stats, df)
+    total_app_reviewers = prog["total_app_reviewers"]
+    pending_app_reviewers = prog["pending_app_reviewers"]
+    done_app_reviewers = prog["done_app_reviewers"]
+    progress_pct = prog["progress_pct"]
+    distinct_reviewers_to_notify = prog["distinct_reviewers_to_notify"]
+
+    w_metrics = widgets.HTML(
+        f"<b>Total app-reviewers:</b> {total_app_reviewers} &nbsp; "
+        f"<b>Pending:</b> {pending_app_reviewers} &nbsp; "
+        f"<b>Done:</b> {done_app_reviewers} &nbsp; "
+        f"<b>Progress:</b> {progress_pct}% &nbsp; "
+        f"<b>Distinct reviewers to notify:</b> {distinct_reviewers_to_notify}"
+    )
+    w_bar = widgets.IntProgress(
+        value=done_app_reviewers,
+        min=0,
+        max=max(1, total_app_reviewers),
+        bar_style="success" if pending_app_reviewers == 0 else "info",
+        layout=widgets.Layout(width="420px"),
+    )
+    w_bar_lbl = widgets.HTML(
+        f"{done_app_reviewers}/{total_app_reviewers} completed",
+        layout=widgets.Layout(width="180px"),
+    )
+
+    overview_box = widgets.VBox([
+        widgets.HTML("<h4>📈 Progress Overview</h4>"),
+        w_metrics,
+        widgets.HBox([w_bar, w_bar_lbl], layout=widgets.Layout(align_items="center")),
+        widgets.HTML("<h4>🧾 Remaining Work (Pending App-Reviewers)</h4>"),
+        widgets.HTML(_r6_remaining_work_html(prog["remaining_work_df"])),
+    ], layout=widgets.Layout(margin="8px 0 12px 0"))
 
     unified = {}
     for _, row in stats.iterrows():
@@ -451,8 +575,9 @@ def _build_r6_dashboard():
                 widgets.HTML(rd["detail"]),
             ]))
         items.append(widgets.VBox([lbl, widgets.VBox(rev_lines, layout=widgets.Layout(margin="5px 0 10px 20px"))]))
-    s6_dashboard.children = tuple(items)
+    s6_dashboard.children = tuple([overview_box] + items)
     globals()["r6_unified"] = unified
+    globals()["r6_progress"] = prog
 
 
 # Export handlers
@@ -484,15 +609,27 @@ def on_s6_global(_):
     if df is None or df.empty:
         return
     stats = df.groupby(["Category", "App_Name", "reviewer"]).agg(
+        total_rows=("reviewer", "size"),
         missing=("is_missing", "sum"), approved=("stats_appr", "sum"),
         denied=("stats_deny", "sum"), changed=("stats_chg", "sum"),
     ).reset_index()
+    prog = _r6_compute_overall_progress(stats, df)
     rows = [{"Category": r["Category"], "App Name": r["App_Name"], "Reviewer": r["reviewer"],
              "Status": "Completed" if r["missing"] == 0 else "Pending",
              "Approved": int(r["approved"]), "Denied": int(r["denied"]),
              "Changed": int(r["changed"])} for _, r in stats.iterrows()]
     fpath = safe_excel_path(os.path.join(REPORT_DIR, f"Summary_Report_{TODAY_STR}.xlsx"))
-    pd.DataFrame(rows).to_excel(fpath, index=False)
+
+    summary_df = pd.DataFrame(rows)
+    overview_df = prog["overview_df"]
+    remaining_df = prog["remaining_work_df"]
+
+    with pd.ExcelWriter(fpath, engine="openpyxl") as writer:
+        summary_df.to_excel(writer, index=False, sheet_name="Sheet1")
+        overview_df.to_excel(writer, index=False, sheet_name="Progress", startrow=0)
+        start = len(overview_df) + 2
+        remaining_df.to_excel(writer, index=False, sheet_name="Progress", startrow=start)
+
     format_export_excel(fpath)
     s6_status.value = f"<span style='color:green'>✅ Global report saved</span>"
 
