@@ -68,7 +68,6 @@ def _build_section_table(rows):
 def _build_email_html(reviewer_name, new_rows, followup_rows):
     parts = [
         f"Hi {reviewer_name},<br><br>",
-        "The Information Security team is sending you an entitlement review update.<br><br>",
     ]
     if new_rows:
         parts.append("<b>1) New Applications to Review</b><br>")

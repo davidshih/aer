@@ -145,7 +145,7 @@ AER_ROOT_PERSON = "Steven Bush"
 AER_ORG_DEPTH = 3
 AER_FUZZY_THRESHOLD = 89
 BASE_PATH = f"{AER_REVIEW_YEAR} Entitlement Review"
-AER_EMAIL_TEMPLATE_FOOTER = "Sincerely,\nInformation Security Team"
+AER_EMAIL_TEMPLATE_FOOTER = "Sincerely,\nApple Bank's Information Security Team"
 TODAY_STR = _DEFAULT_TODAY_STR
 HOUR_STR = _DEFAULT_HOUR_STR
 LOG_FILE = os.path.join(OUTPUT_LOG_DIR, f"aer_{TODAY_STR}_{HOUR_STR}00.log")
@@ -187,7 +187,7 @@ def load_config():
         base_path=base_path,
         email_template_footer=os.getenv(
             "AER_EMAIL_TEMPLATE_FOOTER",
-            "Sincerely,\nInformation Security Team",
+            "Sincerely,\nApple Bank's Information Security Team",
         ).strip().replace("\\n", "\n"),
     )
 

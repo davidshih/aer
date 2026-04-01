@@ -519,11 +519,11 @@ def _build_r6_dashboard():
     distinct_reviewers_to_notify = prog["distinct_reviewers_to_notify"]
 
     w_metrics = widgets.HTML(
-        f"<b>Total app-reviewers:</b> {total_app_reviewers} &nbsp; "
-        f"<b>Pending:</b> {pending_app_reviewers} &nbsp; "
-        f"<b>Done:</b> {done_app_reviewers} &nbsp; "
-        f"<b>Progress:</b> {progress_pct}% &nbsp; "
-        f"<b>Distinct reviewers to notify:</b> {distinct_reviewers_to_notify}"
+        f"Total app-reviewers: {total_app_reviewers} &nbsp; "
+        f"Pending: {pending_app_reviewers} &nbsp; "
+        f"Done: {done_app_reviewers} &nbsp; "
+        f"Progress: {progress_pct}% &nbsp; "
+        f"Distinct reviewers to notify: {distinct_reviewers_to_notify}"
     )
     w_bar = widgets.IntProgress(
         value=done_app_reviewers,
