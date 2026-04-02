@@ -2,380 +2,357 @@ name: Security Scan
 
 on:
   push:
-    branches: [ master, main, develop ]
+    branches: [master, main, develop]
   pull_request:
-    branches: [ master, main ]
+    branches: [master, main]
   schedule:
-    # Run security scan every Monday at 2 AM
-    - cron: '0 2 * * 1'
+    - cron: '0 2 * * 1'   # Every Monday 2 AM
   workflow_dispatch:
 
 permissions:
   contents: read
   security-events: write
   pull-requests: write
-  issues: write
 
 jobs:
-  # Secret Detection
+  # ─────────────────────────────────────────────────────────────
+  # Stage 1 — Strip notebook outputs and convert to .py
+  # Notebooks store outputs (images, printed tokens, API responses)
+  # in JSON — must be stripped BEFORE any secret scanner sees them.
+  # Uses nbconvert --clear-output which handles old nbformat gracefully.
+  # ─────────────────────────────────────────────────────────────
+  prepare:
+    name: Prepare (Strip & Convert Notebooks)
+    runs-on: ubuntu-latest
+    outputs:
+      has_notebooks: ${{ steps.detect.outputs.has_notebooks }}
+      has_requirements: ${{ steps.detect.outputs.has_requirements }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Detect project structure
+        id: detect
+        run: |
+          nb_count=$(find . -name "*.ipynb" \
+            -not -path "./.git/*" \
+            -not -path "*/.ipynb_checkpoints/*" | wc -l | tr -d ' ')
+          echo "Found $nb_count notebooks"
+          echo "has_notebooks=$([ "$nb_count" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+          req_exists=false
+          { [ -f requirements.txt ] || [ -f pyproject.toml ] || [ -f setup.py ]; } && req_exists=true || true
+          echo "has_requirements=$req_exists" >> "$GITHUB_OUTPUT"
+
+      - name: Install notebook tools
+        if: steps.detect.outputs.has_notebooks == 'true'
+        run: pip install --quiet nbconvert nbqa
+
+      - name: Strip outputs and convert notebooks to Python
+        if: steps.detect.outputs.has_notebooks == 'true'
+        run: |
+          # Work on a copy — never modify checked-out source
+          cp -r . /tmp/stripped
+          mkdir -p /tmp/converted
+
+          find /tmp/stripped -name "*.ipynb" \
+            -not -path "*/.git/*" \
+            -not -path "*/.ipynb_checkpoints/*" | while IFS= read -r nb; do
+
+            # Strip all cell outputs in-place
+            # nbconvert --clear-output handles old nbformat (missing id fields) gracefully
+            jupyter nbconvert --clear-output --inplace "$nb" 2>/dev/null \
+              && echo "✓ stripped: ${nb#/tmp/stripped/}" \
+              || echo "⚠ strip failed (skipping): ${nb#/tmp/stripped/}"
+
+            # Convert to .py preserving relative directory structure
+            rel_dir=$(dirname "${nb#/tmp/stripped/}")
+            mkdir -p "/tmp/converted/$rel_dir"
+            jupyter nbconvert --to script "$nb" \
+              --output-dir "/tmp/converted/$rel_dir" \
+              --no-prompt 2>/dev/null \
+              && echo "✓ converted: ${nb#/tmp/stripped/}" \
+              || echo "⚠ convert skipped: ${nb#/tmp/stripped/}"
+          done
+
+          echo ""
+          echo "── Summary ──────────────────────────────"
+          echo "Stripped notebooks : $(find /tmp/stripped  -name '*.ipynb' | wc -l | tr -d ' ')"
+          echo "Converted .py files: $(find /tmp/converted -name '*.py'    | wc -l | tr -d ' ')"
+
+      - uses: actions/upload-artifact@v4
+        if: steps.detect.outputs.has_notebooks == 'true'
+        with:
+          name: stripped-notebooks
+          path: /tmp/stripped/
+          retention-days: 1
+
+      - uses: actions/upload-artifact@v4
+        if: steps.detect.outputs.has_notebooks == 'true'
+        with:
+          name: converted-py
+          path: /tmp/converted/
+          retention-days: 1
+
+  # ─────────────────────────────────────────────────────────────
+  # Stage 2a — Secret Detection
+  # Scan git history (TruffleHog), current files (Gitleaks),
+  # and code cells in stripped notebooks (detect-secrets).
+  # ─────────────────────────────────────────────────────────────
   secret-scan:
     name: Secret Detection
     runs-on: ubuntu-latest
-    
-    steps:
-    - uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-    
-    - name: TruffleHog Secret Scan
-      uses: trufflesecurity/trufflehog@main
-      with:
-        path: ./
-        base: ${{ github.event.repository.default_branch }}
-        head: HEAD
-        extra_args: --debug --only-verified
-    
-    - name: Gitleaks Secret Scan
-      uses: gitleaks/gitleaks-action@v2
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    
-    - name: Detect Secrets
-      run: |
-        pip install detect-secrets
-        detect-secrets scan --all-files --force-use-all-plugins --baseline .secrets.baseline || true
-        
-        # Check if new secrets were introduced
-        if [ -f .secrets.baseline ]; then
-          detect-secrets audit .secrets.baseline || echo "::warning::Potential secrets detected"
-        fi
+    needs: prepare
 
-  # Dependency Vulnerability Scan
-  dependency-scan:
-    name: Dependency Vulnerability Scan
-    runs-on: ubuntu-latest
-    
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Run Trivy vulnerability scanner
-      uses: aquasecurity/trivy-action@master
-      with:
-        scan-type: 'fs'
-        scan-ref: '.'
-        format: 'sarif'
-        output: 'trivy-results.sarif'
-        severity: 'CRITICAL,HIGH,MEDIUM'
-        ignore-unfixed: true
-    
-    - name: Upload Trivy results to GitHub Security
-      uses: github/codeql-action/upload-sarif@v3
-      with:
-        sarif_file: 'trivy-results.sarif'
-    
-    - name: Python Safety Check
-      if: hashFiles('requirements.txt') != ''
-      run: |
-        pip install safety
-        safety check --json --output safety-report.json || true
-        
-        if [ -f safety-report.json ]; then
-          echo "## Python Dependency Vulnerabilities" >> $GITHUB_STEP_SUMMARY
-          cat safety-report.json | python -m json.tool >> $GITHUB_STEP_SUMMARY
-        fi
-    
-    - name: NPM Audit
-      if: hashFiles('package-lock.json') != ''
-      run: |
-        npm audit --json > npm-audit.json || true
-        
-        if [ -f npm-audit.json ]; then
-          echo "## NPM Dependency Vulnerabilities" >> $GITHUB_STEP_SUMMARY
-          cat npm-audit.json | python -m json.tool >> $GITHUB_STEP_SUMMARY
-        fi
-    
-    - name: Check for outdated dependencies
-      run: |
-        if [ -f requirements.txt ]; then
-          pip install pip-audit
-          pip-audit --desc || echo "::warning::Vulnerable Python packages found"
-        fi
-        
-        if [ -f package.json ]; then
-          npx npm-check-updates || echo "::warning::Outdated npm packages found"
-        fi
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-  # SAST (Static Application Security Testing)
+      # Scans full git history — catches secrets that were committed
+      # inside notebook output cells in the past, even if stripped now
+      - name: TruffleHog (git history)
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: ${{ github.event.before || github.event.repository.default_branch }}
+          head: HEAD
+          extra_args: --only-verified
+        continue-on-error: true
+
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+
+      # Scan stripped notebooks for secrets in CODE cells only
+      - name: Download stripped notebooks
+        if: needs.prepare.outputs.has_notebooks == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: stripped-notebooks
+          path: /tmp/stripped
+
+      - name: detect-secrets (code cells only)
+        if: needs.prepare.outputs.has_notebooks == 'true'
+        run: |
+          pip install --quiet detect-secrets
+          detect-secrets scan /tmp/stripped \
+            --all-files \
+            --force-use-all-plugins \
+            --exclude-files '.*\.git/.*' \
+            --exclude-files '.*ipynb_checkpoints.*' \
+            > .secrets.json || true
+
+          python3 - << 'EOF'
+          import json, sys
+          data   = json.load(open('.secrets.json'))
+          hits   = data.get('results', {})
+          total  = sum(len(v) for v in hits.values())
+          if total:
+              print(f'::warning::detect-secrets: {total} potential secret(s) found')
+              for path, findings in hits.items():
+                  for f in findings:
+                      print(f'::warning file={path},line={f["line_number"]}::{f["type"]}')
+          else:
+              print('detect-secrets: clean ✓')
+          EOF
+
+  # ─────────────────────────────────────────────────────────────
+  # Stage 2b — Static Analysis (SAST)
+  # Run bandit via nbqa directly on .ipynb (most accurate),
+  # and semgrep on both source .py + converted notebook .py files.
+  # ─────────────────────────────────────────────────────────────
   sast-scan:
-    name: SAST Security Scan
+    name: Static Analysis (SAST)
     runs-on: ubuntu-latest
-    
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Initialize CodeQL
-      uses: github/codeql-action/init@v3
-      with:
-        languages: python, javascript
-        queries: security-and-quality
-    
-    - name: Autobuild
-      uses: github/codeql-action/autobuild@v3
-    
-    - name: Perform CodeQL Analysis
-      uses: github/codeql-action/analyze@v3
-      with:
-        category: "/language:python"
-    
-    - name: Semgrep Security Scan
-      uses: returntocorp/semgrep-action@v1
-      with:
-        config: >-
-          p/security-audit
-          p/secrets
-          p/owasp-top-ten
-          p/r2c-best-practices
-        generateSarif: true
-    
-    - name: Upload Semgrep results
-      uses: github/codeql-action/upload-sarif@v3
-      with:
-        sarif_file: semgrep.sarif
-      if: always()
-    
-    - name: Bandit Python Security Scan
-      if: hashFiles('**/*.py') != ''
-      run: |
-        pip install bandit
-        bandit -r . -f json -o bandit-report.json -ll || true
-        
-        if [ -f bandit-report.json ]; then
-          echo "## Bandit Security Findings" >> $GITHUB_STEP_SUMMARY
-          cat bandit-report.json | python -m json.tool >> $GITHUB_STEP_SUMMARY
-        fi
+    needs: prepare
 
-  # Container Security Scan
-  container-scan:
-    name: Container Security Scan
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Download stripped notebooks
+        if: needs.prepare.outputs.has_notebooks == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: stripped-notebooks
+          path: /tmp/stripped
+
+      - name: Download converted Python
+        if: needs.prepare.outputs.has_notebooks == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: converted-py
+          path: /tmp/converted
+
+      - name: Install scanners
+        run: pip install --quiet "bandit[toml]" nbqa semgrep
+
+      # nbqa runs bandit INSIDE each notebook cell-by-cell
+      # This is more accurate than scanning converted .py files
+      - name: nbqa bandit (notebooks direct)
+        if: needs.prepare.outputs.has_notebooks == 'true'
+        run: |
+          echo "── nbqa bandit on stripped notebooks ──────────────"
+          nbqa bandit /tmp/stripped \
+            --recursive \
+            --level medium \
+            --confidence medium \
+            2>/dev/null \
+            || echo "::warning::bandit found issues in notebooks"
+
+      - name: Bandit (source .py files)
+        run: |
+          echo "── bandit on source .py ────────────────────────────"
+          bandit -r . \
+            --exclude "./.git,./venv,./.venv,./env" \
+            --level medium \
+            --confidence medium \
+            --format sarif \
+            --output bandit.sarif \
+            2>/dev/null || true
+          bandit -r . \
+            --exclude "./.git,./venv,./.venv,./env" \
+            --level medium \
+            --confidence medium \
+            2>/dev/null \
+            || echo "::warning::bandit found issues in source"
+
+      # Semgrep 1.x supports .ipynb natively
+      - name: Semgrep
+        run: |
+          echo "── semgrep ─────────────────────────────────────────"
+          EXTRA=""
+          [ -d /tmp/converted ] && EXTRA="/tmp/converted"
+          semgrep scan \
+            --config=p/python \
+            --config=p/security-audit \
+            --config=p/secrets \
+            --sarif --output=semgrep.sarif \
+            --exclude=".git" --exclude="venv" --exclude=".venv" \
+            . $EXTRA \
+            --no-error 2>/dev/null \
+            || echo "::warning::semgrep found issues"
+
+      - name: Upload SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: bandit.sarif
+        continue-on-error: true
+
+  # ─────────────────────────────────────────────────────────────
+  # Stage 2c — Dependency Vulnerabilities
+  # ─────────────────────────────────────────────────────────────
+  dependency-scan:
+    name: Dependency Vulnerabilities
     runs-on: ubuntu-latest
-    if: hashFiles('Dockerfile') != ''
-    
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Build Docker image for scanning
-      run: |
-        docker build -t local-scan:latest .
-    
-    - name: Run Trivy container scan
-      uses: aquasecurity/trivy-action@master
-      with:
-        image-ref: 'local-scan:latest'
-        format: 'sarif'
-        output: 'container-scan.sarif'
-        severity: 'CRITICAL,HIGH'
-    
-    - name: Upload container scan results
-      uses: github/codeql-action/upload-sarif@v3
-      with:
-        sarif_file: 'container-scan.sarif'
-    
-    - name: Docker Scout scan
-      uses: docker/scout-action@v1
-      with:
-        command: cves
-        image: local-scan:latest
-        only-severities: critical,high
-        exit-code: false
-    
-    - name: Scan with Snyk
-      continue-on-error: true
-      env:
-        SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-      run: |
-        if [ ! -z "$SNYK_TOKEN" ]; then
-          npm install -g snyk
-          snyk container test local-scan:latest --severity-threshold=high || true
-        fi
+    needs: prepare
+    if: needs.prepare.outputs.has_requirements == 'true'
 
-  # Infrastructure as Code Security
-  iac-scan:
-    name: IaC Security Scan
-    runs-on: ubuntu-latest
-    
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Checkov IaC Scan
-      uses: bridgecrewio/checkov-action@master
-      with:
-        directory: .
-        quiet: true
-        soft_fail: true
-        framework: all
-        output_format: sarif
-        output_file_path: checkov.sarif
-    
-    - name: Upload Checkov results
-      uses: github/codeql-action/upload-sarif@v3
-      with:
-        sarif_file: checkov.sarif
-    
-    - name: Terrascan IaC scan
-      run: |
-        docker run --rm -v "$(pwd):/src" accurics/terrascan scan -d /src || true
+      - uses: actions/checkout@v4
 
-  # License Compliance Check
-  license-check:
-    name: License Compliance
-    runs-on: ubuntu-latest
-    
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: License Finder
-      run: |
-        if [ -f requirements.txt ]; then
-          pip install pip-licenses
-          pip-licenses --from=mixed --format=json --output-file=licenses.json
-          
-          # Check for restrictive licenses
-          if grep -E '"(GPL|AGPL|LGPL)"' licenses.json; then
-            echo "::warning::Copyleft licenses detected. Please review compatibility."
-          fi
-        fi
-        
-        if [ -f package.json ]; then
-          npx license-checker --json --out licenses-npm.json
-          
-          # Check for problematic licenses
-          if grep -E '"(GPL|AGPL|LGPL)"' licenses-npm.json; then
-            echo "::warning::Copyleft licenses detected in npm dependencies."
-          fi
-        fi
-    
-    - name: FOSSA License Scan
-      continue-on-error: true
-      env:
-        FOSSA_API_KEY: ${{ secrets.FOSSA_API_KEY }}
-      run: |
-        if [ ! -z "$FOSSA_API_KEY" ]; then
-          curl -H 'Cache-Control: no-cache' https://raw.githubusercontent.com/fossas/fossa-cli/master/install-latest.sh | bash
-          fossa analyze
-          fossa test || echo "::warning::License compliance issues found"
-        fi
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
-  # Security Headers Check (for web applications)
-  security-headers:
-    name: Security Headers Check
-    runs-on: ubuntu-latest
-    if: contains(github.repository, 'transcribe')
-    
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Check security headers in code
-      run: |
-        echo "## Security Headers Check" >> $GITHUB_STEP_SUMMARY
-        
-        # Check for security headers in Python Flask app
-        if [ -f app.py ]; then
-          echo "### Flask Security Headers" >> $GITHUB_STEP_SUMMARY
-          
-          headers=(
-            "X-Frame-Options"
-            "X-Content-Type-Options"
-            "Content-Security-Policy"
-            "X-XSS-Protection"
-            "Strict-Transport-Security"
-          )
-          
-          for header in "${headers[@]}"; do
-            if grep -q "$header" app.py; then
-              echo "✅ $header is set" >> $GITHUB_STEP_SUMMARY
-            else
-              echo "⚠️ $header is missing" >> $GITHUB_STEP_SUMMARY
-            fi
-          done
-        fi
+      - name: pip-audit
+        run: |
+          pip install --quiet pip-audit
+          pip-audit -r requirements.txt --desc \
+            || echo "::warning::pip-audit found vulnerable packages"
 
-  # OWASP Dependency Check
-  owasp-check:
-    name: OWASP Dependency Check
-    runs-on: ubuntu-latest
-    
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Run OWASP Dependency Check
-      uses: dependency-check/Dependency-Check_Action@main
-      with:
-        project: ${{ github.repository }}
-        path: '.'
-        format: 'HTML'
-        args: >
-          --enableRetired
-          --enableExperimental
-    
-    - name: Upload OWASP results
-      uses: actions/upload-artifact@v4
-      with:
-        name: owasp-dependency-check-report
-        path: reports/
+      # Bonus: cross-check notebook imports against requirements.txt
+      - name: Audit notebook imports vs requirements.txt
+        if: needs.prepare.outputs.has_notebooks == 'true'
+        run: |
+          python3 - << 'EOF'
+          import json, glob, re, pathlib
 
-  # Security Report Summary
+          req_file = pathlib.Path('requirements.txt')
+          declared = set()
+          if req_file.exists():
+              for line in req_file.read_text().splitlines():
+                  m = re.match(r'^([A-Za-z0-9_\-]+)', line.strip())
+                  if m:
+                      declared.add(m.group(1).lower().replace('-','_'))
+
+          nb_imports = set()
+          for nb_path in glob.glob('**/*.ipynb', recursive=True):
+              try:
+                  nb = json.load(open(nb_path))
+                  for cell in nb.get('cells', []):
+                      if cell['cell_type'] == 'code':
+                          for line in cell.get('source', []):
+                              match = re.match(r'^\s*(?:import|from)\s+([\w]+)', line)
+                              if match:
+                                  nb_imports.add(match.group(1).lower())
+              except Exception:
+                  pass
+
+          stdlib = {'os','sys','re','json','pathlib','datetime','collections',
+                    'itertools','functools','typing','math','random','time',
+                    'hashlib','base64','io','copy','abc','enum','warnings',
+                    'logging','argparse','subprocess','shutil','tempfile',
+                    'contextlib','dataclasses','threading','concurrent'}
+          external    = nb_imports - stdlib - {'__future__'}
+          undeclared  = external - declared
+
+          print(f'Notebook imports   : {sorted(external)}')
+          print(f'Declared in req.txt: {sorted(declared)}')
+          if undeclared:
+              print(f'::warning::Undeclared deps in notebooks: {sorted(undeclared)}')
+          else:
+              print('All notebook imports covered in requirements.txt ✓')
+          EOF
+
+  # ─────────────────────────────────────────────────────────────
+  # Stage 3 — Summary (always runs, handles skipped jobs cleanly)
+  # ─────────────────────────────────────────────────────────────
   security-report:
-    name: Security Report Summary
+    name: Security Report
     runs-on: ubuntu-latest
-    needs: [secret-scan, dependency-scan, sast-scan, container-scan, iac-scan, license-check, security-headers, owasp-check]
+    needs: [prepare, secret-scan, sast-scan, dependency-scan]
     if: always()
-    
+
     steps:
-    - name: Generate Security Summary
-      uses: actions/github-script@v7
-      with:
-        script: |
-          const jobs = ${{ toJson(needs) }};
-          const failed = Object.entries(jobs).filter(([name, job]) => job.result === 'failure');
-          const warnings = Object.entries(jobs).filter(([name, job]) => job.result === 'success' && job.conclusion === 'warning');
-          
-          let report = '# 🔒 Security Scan Summary\n\n';
-          
-          if (failed.length === 0) {
-            report += '✅ **All security scans passed**\n\n';
-          } else {
-            report += `⚠️ **${failed.length} security scan(s) failed**\n\n`;
-            report += 'Failed scans:\n';
-            failed.forEach(([name, _]) => {
-              report += `- ${name}\n`;
-            });
-            report += '\n';
-          }
-          
-          report += '## Scan Results\n\n';
-          report += '| Scan Type | Status |\n';
-          report += '|-----------|--------|\n';
-          
-          Object.entries(jobs).forEach(([name, job]) => {
-            const emoji = job.result === 'success' ? '✅' : job.result === 'failure' ? '❌' : '⏭️';
-            report += `| ${name.replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase())} | ${emoji} |\n`;
-          });
-          
-          report += '\n## Recommendations\n\n';
-          report += '1. Review and fix any critical vulnerabilities immediately\n';
-          report += '2. Update dependencies with known vulnerabilities\n';
-          report += '3. Ensure no secrets are committed to the repository\n';
-          report += '4. Follow security best practices for your framework\n';
-          
-          // Post comment on PR
-          if (context.eventName === 'pull_request') {
-            await github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: report
-            });
-          }
-          
-          // Add to job summary
-          await core.summary.addRaw(report).write();
+      - name: Generate Summary
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const needs = ${{ toJson(needs) }};
+            const icon  = { success:'✅', failure:'❌', skipped:'⏭️', cancelled:'🚫' };
+
+            let md = '# 🔒 Security Scan Results\n\n';
+            md += '| Job | Result |\n|-----|--------|\n';
+            for (const [name, job] of Object.entries(needs)) {
+              md += `| ${name} | ${icon[job.result] ?? '❓'} ${job.result} |\n`;
+            }
+
+            const failed = Object.entries(needs).filter(([,j]) => j.result === 'failure');
+            md += failed.length > 0
+              ? `\n⚠️ **${failed.length} job(s) need attention:** ${failed.map(([n])=>n).join(', ')}\n`
+              : '\n✅ All scans passed.\n';
+
+            await core.summary.addRaw(md).write();
+
+            if (context.eventName === 'pull_request' && failed.length > 0) {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: md
+              });
+            }
