@@ -8,13 +8,8 @@ import pandas as pd
 NOTEBOOK_PATH = (
     Path(__file__).resolve().parents[1] / "snowflake_trust_center_to_secops.ipynb"
 )
-HELPER_CELL_PREFIXES = [
-    "# Cell 4 - Configuration helpers",
-    "# Cell 7 - Selector helpers",
-    "# Cell 14 - Query execution helpers",
-    "# Cell 17 - Send selection helpers",
-    "# Cell 20 - SecOps sender helpers",
-]
+HELPER_CELL_PREFIX = "# Cell 2 - Helpers and configuration"
+CONTROL_PANEL_CELL_PREFIX = "# Cell 3 - Unified control panel"
 
 
 def load_notebook():
@@ -34,9 +29,8 @@ def find_code_cell_source(notebook, prefix: str) -> str:
 
 def load_helper_namespace():
     notebook = load_notebook()
-    namespace = {}
-    for prefix in HELPER_CELL_PREFIXES:
-        exec(find_code_cell_source(notebook, prefix), namespace)
+    namespace = {"__NOTEBOOK_TEST__": True}
+    exec(find_code_cell_source(notebook, HELPER_CELL_PREFIX), namespace)
     return namespace
 
 
@@ -65,9 +59,35 @@ def make_config(namespace):
     )
 
 
+def make_success_result(namespace, group_key: str, row_count: int = 2):
+    account_label, query_key = namespace["split_group_key"](group_key)
+    return {
+        "group_key": group_key,
+        "account_label": account_label,
+        "query_key": query_key,
+        "query_name": query_key,
+        "status": "success",
+        "row_count": row_count,
+        "columns": ["value"],
+        "dataframe": pd.DataFrame([{"value": idx} for idx in range(1, row_count + 1)]),
+        "error": None,
+    }
+
+
 def test_notebook_json_is_valid():
     notebook = load_notebook()
     nbformat.validate(notebook)
+
+
+def test_notebook_is_consolidated_to_four_cells_with_control_panel():
+    notebook = load_notebook()
+
+    assert len(notebook.cells) == 4
+    control_panel_source = find_code_cell_source(notebook, CONTROL_PANEL_CELL_PREFIX)
+    assert "widgets.GridspecLayout" in control_panel_source
+    assert 'description="DRY_RUN"' in control_panel_source
+    assert 'description="Run Selected"' in control_panel_source
+    assert 'description="Send Selected to SecOps"' in control_panel_source
 
 
 def test_build_runtime_config_supports_sparse_indexes_and_multiline_sql():
@@ -87,22 +107,27 @@ def test_build_runtime_config_supports_sparse_indexes_and_multiline_sql():
     assert config["DRY_RUN"] is True
 
 
-def test_build_default_selection_prefers_first_account_and_all_queries():
+def test_create_app_state_seeds_dry_run_and_first_account_defaults():
     namespace = load_helper_namespace()
     config = make_config(namespace)
 
-    selection = namespace["build_default_selection"](config)
+    app_state = namespace["create_app_state"](config)
 
-    assert selection == {
-        "accounts": ["prod"],
-        "queries": ["security_check_1", "security_check_4"],
-    }
+    assert app_state["dry_run"] is True
+    assert app_state["checked_groups"] == [
+        "prod::security_check_1",
+        "prod::security_check_4",
+    ]
+    assert config["SEND_SELECTION"] == app_state["checked_groups"]
 
 
-def test_execute_selected_queries_only_runs_requested_account_query_pairs():
+def test_execute_selected_groups_only_runs_requested_pairs():
     namespace = load_helper_namespace()
     config = make_config(namespace)
-    selection = {"accounts": ["prod", "staging"], "queries": ["security_check_4"]}
+    selected_group_keys = [
+        namespace["make_group_key"]("prod", "security_check_4"),
+        namespace["make_group_key"]("staging", "security_check_4"),
+    ]
     connect_calls = []
     fetch_calls = []
 
@@ -114,18 +139,15 @@ def test_execute_selected_queries_only_runs_requested_account_query_pairs():
         fetch_calls.append((conn["label"], sql))
         return pd.DataFrame([{"account": conn["label"], "sql": sql}])
 
-    results = namespace["execute_selected_queries"](
+    results = namespace["execute_selected_groups"](
         config,
-        selection,
+        selected_group_keys,
         connect_fn=fake_connect,
         fetch_fn=fake_fetch,
         close_fn=lambda _conn: None,
     )
 
-    assert sorted(results) == [
-        "prod::security_check_4",
-        "staging::security_check_4",
-    ]
+    assert list(results) == selected_group_keys
     assert connect_calls == ["prod", "staging"]
     assert fetch_calls == [
         ("prod", "SELECT 4"),
@@ -133,50 +155,90 @@ def test_execute_selected_queries_only_runs_requested_account_query_pairs():
     ]
 
 
-def test_build_send_candidates_marks_empty_and_failed_groups_unselectable():
+def test_sync_runtime_selection_marks_mode_changes_dirty_after_run():
     namespace = load_helper_namespace()
-    query_results = {
-        "prod::security_check_1": {
-            "group_key": "prod::security_check_1",
-            "account_label": "prod",
-            "query_key": "security_check_1",
-            "query_name": "users_without_mfa",
-            "status": "success",
-            "row_count": 2,
-            "dataframe": pd.DataFrame([{"value": 1}, {"value": 2}]),
-            "error": None,
-        },
-        "prod::security_check_4": {
-            "group_key": "prod::security_check_4",
-            "account_label": "prod",
-            "query_key": "security_check_4",
-            "query_name": "security_check_4",
-            "status": "empty",
-            "row_count": 0,
-            "dataframe": pd.DataFrame(),
-            "error": None,
-        },
-        "staging::security_check_4": {
-            "group_key": "staging::security_check_4",
-            "account_label": "staging",
-            "query_key": "security_check_4",
-            "query_name": "security_check_4",
-            "status": "error",
-            "row_count": 0,
-            "dataframe": pd.DataFrame(),
-            "error": "permission denied",
-        },
-    }
+    config = make_config(namespace)
+    app_state = namespace["create_app_state"](config)
+    app_state["last_run_selection"] = namespace["get_selection_snapshot"](
+        app_state["checked_groups"],
+        app_state["dry_run"],
+        app_state["group_catalog"],
+    )
 
-    candidates = {
-        item["group_key"]: item for item in namespace["build_send_candidates"](query_results)
-    }
+    namespace["sync_runtime_selection"](
+        app_state,
+        app_state["checked_groups"],
+        False,
+    )
 
-    assert candidates["prod::security_check_1"]["disabled"] is False
-    assert candidates["prod::security_check_1"]["default_selected"] is True
-    assert candidates["prod::security_check_4"]["disabled"] is True
-    assert candidates["staging::security_check_4"]["disabled"] is True
-    assert "permission denied" in candidates["staging::security_check_4"]["reason"]
+    assert app_state["selection_dirty"] is True
+    assert "Mode changed" in app_state["dirty_reason"]
+
+
+def test_reduce_send_state_requires_clean_successful_checked_groups():
+    namespace = load_helper_namespace()
+    config = make_config(namespace)
+    app_state = namespace["create_app_state"](config)
+    selected_group = app_state["checked_groups"][0]
+
+    app_state["query_results"][selected_group] = make_success_result(namespace, selected_group)
+    app_state["last_run_selection"] = namespace["get_selection_snapshot"](
+        app_state["checked_groups"],
+        app_state["dry_run"],
+        app_state["group_catalog"],
+    )
+    app_state["selection_dirty"] = False
+    app_state["dirty_reason"] = "Ready to send."
+
+    ready_state = namespace["reduce_send_state"](app_state)
+    assert ready_state["enabled"] is True
+    assert ready_state["eligible_groups"] == [selected_group]
+
+    app_state["selection_dirty"] = True
+    app_state["dirty_reason"] = "Selection changed; rerun required before send."
+    dirty_state = namespace["reduce_send_state"](app_state)
+    assert dirty_state["enabled"] is False
+    assert "rerun required" in dirty_state["reason"]
+
+
+def test_build_sender_config_uses_runtime_dry_run_instead_of_env_default():
+    namespace = load_helper_namespace()
+    config = make_config(namespace)
+    app_state = namespace["create_app_state"](config)
+    app_state["dry_run"] = False
+
+    sender_config = namespace["build_sender_config"](config, app_state)
+
+    assert config["DRY_RUN"] is True
+    assert sender_config["DRY_RUN"] is False
+
+
+def test_build_header_snapshot_reflects_live_mode_and_send_state():
+    namespace = load_helper_namespace()
+    config = make_config(namespace)
+    app_state = namespace["create_app_state"](config)
+    selected_group = app_state["checked_groups"][0]
+
+    app_state["dry_run"] = False
+    app_state["query_results"][selected_group] = make_success_result(namespace, selected_group)
+    app_state["last_run_selection"] = namespace["get_selection_snapshot"](
+        app_state["checked_groups"],
+        app_state["dry_run"],
+        app_state["group_catalog"],
+    )
+    app_state["selection_dirty"] = False
+    app_state["dirty_reason"] = "Ready to send."
+
+    header = namespace["build_header_snapshot"](config, app_state)
+    _events, payload_plan = namespace["build_selected_events"](
+        app_state["query_results"],
+        app_state["checked_groups"],
+        dry_run=app_state["dry_run"],
+    )
+
+    assert header["dry_run"] is False
+    assert header["send_enabled"] is True
+    assert payload_plan["dry_run"] is False
 
 
 def test_row_to_generic_log_serializes_payload_and_extracts_timestamp():
