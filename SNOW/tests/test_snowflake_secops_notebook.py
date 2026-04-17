@@ -1,3 +1,4 @@
+import os
 from decimal import Decimal
 from pathlib import Path
 
@@ -105,6 +106,57 @@ def test_build_runtime_config_supports_sparse_indexes_and_multiline_sql():
     assert config["SECURITY_CHECKS"][0]["sql"] == "SELECT 1\nAS one"
     assert config["BATCH_SIZE"] == 25
     assert config["DRY_RUN"] is True
+
+
+def test_build_runtime_config_accepts_separate_secops_header_auth_values():
+    namespace = load_helper_namespace()
+    env = {
+        "SNOWFLAKE_ACCOUNT_1": "prod-account.us-east-1",
+        "SNOWFLAKE_USER_1": "svc_prod",
+        "SNOWFLAKE_PRIVATE_KEY_PATH_1": "~/.snowflake/prod.p8",
+        "SNOWFLAKE_LABEL_1": "prod",
+        "SECURITY_CHECK_SQL_1": "SELECT 1",
+        "SECOPS_WEBHOOK_URL": "https://example.test/import",
+        "SECOPS_API_KEY": "header-key",
+        "SECOPS_WEBHOOK_SECRET": "header-secret",
+        "DRY_RUN": "false",
+    }
+
+    config = namespace["build_runtime_config"](
+        env,
+        project_dir=Path("/tmp/project"),
+        env_path=Path("/tmp/project/.env"),
+        prompt_for_missing=False,
+    )
+
+    assert config["SECOPS_WEBHOOK_URL"] == "https://example.test/import"
+    assert config["SECOPS_API_KEY"] == "header-key"
+    assert config["SECOPS_WEBHOOK_SECRET"] == "header-secret"
+    assert namespace["describe_auth_mode"](config["SECOPS_WEBHOOK_URL"]) == "headers"
+
+
+def test_load_environment_overrides_existing_secops_values_from_dotenv(tmp_path, monkeypatch):
+    namespace = load_helper_namespace()
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "SECOPS_API_KEY=file-key\n"
+        "SECOPS_WEBHOOK_SECRET=file-secret\n"
+        "SECOPS_WEBHOOK_URL=https://example.test/import\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("NOTEBOOK_ROOT", str(tmp_path))
+    monkeypatch.setenv("SECOPS_API_KEY", "stale-key")
+    monkeypatch.setenv("SECOPS_WEBHOOK_SECRET", "stale-secret")
+    monkeypatch.setenv("SECOPS_WEBHOOK_URL", "https://example.test/old")
+
+    project_dir, resolved_env_path = namespace["load_environment"](env_path)
+
+    assert project_dir == tmp_path.resolve()
+    assert resolved_env_path == env_path.resolve()
+    assert os.environ["SECOPS_API_KEY"] == "file-key"
+    assert os.environ["SECOPS_WEBHOOK_SECRET"] == "file-secret"
+    assert os.environ["SECOPS_WEBHOOK_URL"] == "https://example.test/import"
 
 
 def test_create_app_state_seeds_dry_run_and_first_account_defaults():
@@ -267,6 +319,28 @@ def test_row_to_generic_log_serializes_payload_and_extracts_timestamp():
     assert event["source_timestamp"] == "2026-04-14T12:00:00+00:00"
     assert event["result"]["SCORE"] == 10.5
     assert event["result"]["EMPTY"] is None
+
+
+def test_row_to_generic_log_handles_nat_without_astimezone_error():
+    namespace = load_helper_namespace()
+    record = {
+        "COMPLETED_AT": pd.NaT,
+        "UPDATED_AT": pd.NaT,
+        "STATUS": "OPEN",
+    }
+
+    event = namespace["row_to_generic_log"](
+        record,
+        account_label="prod",
+        query_key="security_check_1",
+        query_name="users_without_mfa",
+        row_index=1,
+        generated_at="2026-04-17T12:00:00+00:00",
+    )
+
+    assert event["result"]["COMPLETED_AT"] is None
+    assert event["result"]["UPDATED_AT"] is None
+    assert "source_timestamp" not in event
 
 
 def test_send_to_secops_dry_run_reports_batches_without_posting():
