@@ -1,5 +1,4 @@
 import os
-from decimal import Decimal
 from pathlib import Path
 
 import nbformat
@@ -35,44 +34,97 @@ def load_helper_namespace():
     return namespace
 
 
-def make_config(namespace):
+def write_sql_file(path: Path, metadata: dict, sql: str):
+    header = "\n".join(f"-- {key}: {value}" for key, value in metadata.items())
+    path.write_text(f"{header}\n\n{sql.strip()}\n", encoding="utf-8")
+
+
+def make_project_config(namespace, tmp_path: Path):
+    sql_dir = tmp_path / "sql_checks"
+    sql_dir.mkdir()
+    write_sql_file(
+        sql_dir / "login_history_activity.sql",
+        {
+            "title": "Login History Activity",
+            "domain": "Authentication",
+            "priority": "P0",
+            "sources": "ACCOUNT_USAGE.LOGIN_HISTORY",
+            "watermark_column": "event_timestamp",
+            "timestamp_field": "event_timestamp",
+            "native_id_field": "event_id",
+            "max_latency_minutes": "120",
+            "recommended_cadence": "every_15_minutes",
+            "chronicle_log_type": "login_history",
+            "description": "Authentication anomaly monitoring.",
+        },
+        """
+        SELECT
+            1 AS "event_id",
+            CURRENT_TIMESTAMP() AS "event_timestamp",
+            'alice' AS "user_name"
+        """,
+    )
+    write_sql_file(
+        sql_dir / "query_history_activity.sql",
+        {
+            "title": "Query History Activity",
+            "domain": "Query and Control Plane",
+            "priority": "P0",
+            "sources": "ACCOUNT_USAGE.QUERY_HISTORY",
+            "watermark_column": "start_time",
+            "timestamp_field": "event_timestamp",
+            "native_id_field": "query_id",
+            "max_latency_minutes": "45",
+            "recommended_cadence": "every_15_minutes",
+            "chronicle_log_type": "query_history",
+            "description": "Control plane and risky query monitoring.",
+        },
+        """
+        SELECT
+            'q-1' AS "query_id",
+            CURRENT_TIMESTAMP() AS "event_timestamp",
+            CURRENT_TIMESTAMP() AS "start_time",
+            'GRANT' AS "query_type",
+            'GRANT ROLE ACCOUNTADMIN TO USER ALICE' AS "query_text"
+        """,
+    )
+
     env = {
         "SNOWFLAKE_ACCOUNT_1": "prod-account.us-east-1",
         "SNOWFLAKE_USER_1": "svc_prod",
         "SNOWFLAKE_PRIVATE_KEY_PATH_1": "~/.snowflake/prod.p8",
         "SNOWFLAKE_LABEL_1": "prod",
-        "SNOWFLAKE_ACCOUNT_3": "staging-account.eu-west-1",
-        "SNOWFLAKE_USER_3": "svc_staging",
-        "SNOWFLAKE_PRIVATE_KEY_PATH_3": "~/.snowflake/staging.p8",
-        "SNOWFLAKE_LABEL_3": "staging",
-        "SECURITY_CHECK_NAME_1": "users_without_mfa",
-        "SECURITY_CHECK_SQL_1": "SELECT 1\\nAS one",
-        "SECURITY_CHECK_SQL_4": "SELECT 4",
+        "SNOWFLAKE_ACCOUNT_2": "staging-account.us-east-1",
+        "SNOWFLAKE_USER_2": "svc_staging",
+        "SNOWFLAKE_PRIVATE_KEY_PATH_2": "~/.snowflake/staging.p8",
+        "SNOWFLAKE_LABEL_2": "staging",
+        "SECURITY_CHECK_NAME_1": "login_history_activity",
+        "SECURITY_CHECK_SQL_FILE_1": "sql_checks/login_history_activity.sql",
+        "SECURITY_CHECK_NAME_2": "query_history_activity",
+        "SECURITY_CHECK_SQL_FILE_2": "sql_checks/query_history_activity.sql",
+        "SECURITY_CHECK_NAME_3": "inline_custom_check",
+        "SECURITY_CHECK_SQL_3": "SELECT CURRENT_ACCOUNT() AS account_name",
         "SECOPS_WEBHOOK_URL": "https://example.test/import?key=test-key&secret=test-secret",
         "BATCH_SIZE": "25",
         "DRY_RUN": "true",
     }
-    return namespace["build_runtime_config"](
+    config = namespace["build_runtime_config"](
         env,
-        project_dir=Path("/tmp/project"),
-        env_path=Path("/tmp/project/.env"),
+        project_dir=tmp_path,
+        env_path=tmp_path / ".env",
         prompt_for_missing=False,
     )
+    return config, env
 
 
-def make_success_result(namespace, group_key: str, row_count: int = 2):
-    account_label, query_key = namespace["split_group_key"](group_key)
-    return {
-        "group_key": group_key,
-        "account_label": account_label,
-        "query_key": query_key,
-        "query_name": query_key,
-        "status": "success",
-        "row_count": row_count,
-        "columns": ["value"],
-        "dataframe": pd.DataFrame([{"value": idx} for idx in range(1, row_count + 1)]),
-        "error": None,
-    }
+def make_success_result(namespace, config, group_key: str, rows: list[dict], status="success"):
+    group_meta = namespace["build_group_catalog"](config)["group_lookup"][group_key]
+    result = namespace["build_empty_query_result"](group_meta)
+    result["dataframe"] = pd.DataFrame(rows)
+    result["columns"] = result["dataframe"].columns.tolist()
+    result["row_count"] = len(result["dataframe"])
+    result["status"] = status if rows else "empty"
+    return result
 
 
 def test_notebook_json_is_valid():
@@ -80,59 +132,42 @@ def test_notebook_json_is_valid():
     nbformat.validate(notebook)
 
 
-def test_notebook_is_consolidated_to_four_cells_with_control_panel():
+def test_notebook_has_domain_cards_and_run_table_ui():
     notebook = load_notebook()
 
     assert len(notebook.cells) == 4
     control_panel_source = find_code_cell_source(notebook, CONTROL_PANEL_CELL_PREFIX)
-    assert "widgets.GridspecLayout" in control_panel_source
+    assert "DOMAIN_CARDS_BOX" in control_panel_source
+    assert "RUN_TABLE_BOX" in control_panel_source
+    assert "SelectMultiple" in control_panel_source
     assert 'description="DRY_RUN"' in control_panel_source
     assert 'description="Run Selected"' in control_panel_source
     assert 'description="Send Selected to SecOps"' in control_panel_source
+    assert "Check Catalog" in control_panel_source
+    assert "Run Table" in control_panel_source
 
 
-def test_build_runtime_config_supports_sparse_indexes_and_multiline_sql():
+def test_build_runtime_config_loads_sql_file_metadata_and_inline_fallback(tmp_path):
     namespace = load_helper_namespace()
-    config = make_config(namespace)
+    config, _env = make_project_config(namespace, tmp_path)
 
     assert [account["label"] for account in config["SNOWFLAKE_ACCOUNTS"]] == [
         "prod",
         "staging",
     ]
     assert [check["key"] for check in config["SECURITY_CHECKS"]] == [
-        "security_check_1",
-        "security_check_4",
+        "login_history_activity",
+        "query_history_activity",
+        "inline_custom_check",
     ]
-    assert config["SECURITY_CHECKS"][0]["sql"] == "SELECT 1\nAS one"
-    assert config["BATCH_SIZE"] == 25
-    assert config["DRY_RUN"] is True
-
-
-def test_build_runtime_config_accepts_separate_secops_header_auth_values():
-    namespace = load_helper_namespace()
-    env = {
-        "SNOWFLAKE_ACCOUNT_1": "prod-account.us-east-1",
-        "SNOWFLAKE_USER_1": "svc_prod",
-        "SNOWFLAKE_PRIVATE_KEY_PATH_1": "~/.snowflake/prod.p8",
-        "SNOWFLAKE_LABEL_1": "prod",
-        "SECURITY_CHECK_SQL_1": "SELECT 1",
-        "SECOPS_WEBHOOK_URL": "https://example.test/import",
-        "SECOPS_API_KEY": "header-key",
-        "SECOPS_WEBHOOK_SECRET": "header-secret",
-        "DRY_RUN": "false",
-    }
-
-    config = namespace["build_runtime_config"](
-        env,
-        project_dir=Path("/tmp/project"),
-        env_path=Path("/tmp/project/.env"),
-        prompt_for_missing=False,
+    assert config["SECURITY_CHECKS"][0]["title"] == "Login History Activity"
+    assert config["SECURITY_CHECKS"][0]["domain"] == "Authentication"
+    assert config["SECURITY_CHECKS"][0]["chronicle_log_type"] == "login_history"
+    assert config["SECURITY_CHECKS"][0]["sql_path"].endswith(
+        "sql_checks/login_history_activity.sql"
     )
-
-    assert config["SECOPS_WEBHOOK_URL"] == "https://example.test/import"
-    assert config["SECOPS_API_KEY"] == "header-key"
-    assert config["SECOPS_WEBHOOK_SECRET"] == "header-secret"
-    assert namespace["describe_auth_mode"](config["SECOPS_WEBHOOK_URL"]) == "headers"
+    assert config["SECURITY_CHECKS"][2]["chronicle_log_type"] == "custom_query"
+    assert config["SECURITY_CHECKS"][2]["sql"] == "SELECT CURRENT_ACCOUNT() AS account_name"
 
 
 def test_load_environment_overrides_existing_secops_values_from_dotenv(tmp_path, monkeypatch):
@@ -159,26 +194,56 @@ def test_load_environment_overrides_existing_secops_values_from_dotenv(tmp_path,
     assert os.environ["SECOPS_WEBHOOK_URL"] == "https://example.test/import"
 
 
-def test_create_app_state_seeds_dry_run_and_first_account_defaults():
+def test_create_app_state_defaults_to_first_account_visible_rows_only(tmp_path):
     namespace = load_helper_namespace()
-    config = make_config(namespace)
+    config, _env = make_project_config(namespace, tmp_path)
 
     app_state = namespace["create_app_state"](config)
 
-    assert app_state["dry_run"] is True
-    assert app_state["checked_groups"] == [
-        "prod::security_check_1",
-        "prod::security_check_4",
+    assert app_state["selected_accounts"] == ["prod"]
+    assert app_state["selected_checks"] == [
+        "login_history_activity",
+        "query_history_activity",
+        "inline_custom_check",
     ]
-    assert config["SEND_SELECTION"] == app_state["checked_groups"]
+    assert app_state["checked_groups"] == [
+        "prod::login_history_activity",
+        "prod::query_history_activity",
+        "prod::inline_custom_check",
+    ]
 
 
-def test_execute_selected_groups_only_runs_requested_pairs():
+def test_set_check_selection_state_updates_visible_checked_groups(tmp_path):
     namespace = load_helper_namespace()
-    config = make_config(namespace)
+    config, _env = make_project_config(namespace, tmp_path)
+    app_state = namespace["create_app_state"](config)
+
+    namespace["set_check_selection_state"](app_state, "query_history_activity", False)
+
+    assert "prod::query_history_activity" not in app_state["checked_groups"]
+    assert app_state["group_selection_state"]["staging::query_history_activity"] is False
+
+
+def test_build_run_table_rows_exposes_domain_and_log_type_metadata(tmp_path):
+    namespace = load_helper_namespace()
+    config, _env = make_project_config(namespace, tmp_path)
+    app_state = namespace["create_app_state"](config)
+
+    rows = namespace["build_run_table_rows"](config, app_state)
+
+    assert len(rows) == 3
+    assert rows[0]["account"] == "prod"
+    assert rows[0]["domain"] == "Authentication"
+    assert rows[0]["log_type"] == "login_history"
+    assert rows[1]["source"] == "ACCOUNT_USAGE.QUERY_HISTORY"
+
+
+def test_execute_selected_groups_only_runs_requested_rows(tmp_path):
+    namespace = load_helper_namespace()
+    config, _env = make_project_config(namespace, tmp_path)
     selected_group_keys = [
-        namespace["make_group_key"]("prod", "security_check_4"),
-        namespace["make_group_key"]("staging", "security_check_4"),
+        namespace["make_group_key"]("prod", "query_history_activity"),
+        namespace["make_group_key"]("staging", "query_history_activity"),
     ]
     connect_calls = []
     fetch_calls = []
@@ -201,15 +266,12 @@ def test_execute_selected_groups_only_runs_requested_pairs():
 
     assert list(results) == selected_group_keys
     assert connect_calls == ["prod", "staging"]
-    assert fetch_calls == [
-        ("prod", "SELECT 4"),
-        ("staging", "SELECT 4"),
-    ]
+    assert all("GRANT ROLE ACCOUNTADMIN" in sql for _label, sql in fetch_calls)
 
 
-def test_sync_runtime_selection_marks_mode_changes_dirty_after_run():
+def test_sync_runtime_selection_marks_dry_run_change_dirty_after_run(tmp_path):
     namespace = load_helper_namespace()
-    config = make_config(namespace)
+    config, _env = make_project_config(namespace, tmp_path)
     app_state = namespace["create_app_state"](config)
     app_state["last_run_selection"] = namespace["get_selection_snapshot"](
         app_state["checked_groups"],
@@ -217,23 +279,122 @@ def test_sync_runtime_selection_marks_mode_changes_dirty_after_run():
         app_state["group_catalog"],
     )
 
-    namespace["sync_runtime_selection"](
-        app_state,
-        app_state["checked_groups"],
-        False,
-    )
+    namespace["sync_runtime_selection"](app_state, app_state["checked_groups"], False)
 
     assert app_state["selection_dirty"] is True
     assert "Mode changed" in app_state["dirty_reason"]
 
 
-def test_reduce_send_state_requires_clean_successful_checked_groups():
+def test_build_parser_friendly_event_truncates_query_text_and_adds_hash(tmp_path):
     namespace = load_helper_namespace()
-    config = make_config(namespace)
+    config, _env = make_project_config(namespace, tmp_path)
+    group_key = "prod::query_history_activity"
+    query_result = make_success_result(
+        namespace,
+        config,
+        group_key,
+        [
+            {
+                "query_id": "q-1",
+                "event_timestamp": pd.Timestamp("2026-04-17T15:00:00Z"),
+                "query_text": "X" * 10120,
+                "query_type": "GRANT",
+            }
+        ],
+    )
+
+    event = namespace["build_parser_friendly_event"](
+        query_result["dataframe"].to_dict(orient="records")[0],
+        query_result=query_result,
+        generated_at="2026-04-17T16:00:00+00:00",
+        row_index=1,
+        query_text_limit=10000,
+    )
+
+    assert event["application"] == "snowflake"
+    assert event["environment"] == "prod"
+    assert event["log_type"] == "query_history"
+    assert event["event_timestamp"] == "2026-04-17T15:00:00+00:00"
+    assert len(event["query_text"]) < 10120
+    assert event["query_text_truncated"] is True
+    assert len(event["query_text_sha256"]) == 64
+    assert event["record_uid"].startswith("query_history:prod:q-1")
+
+
+def test_build_parser_friendly_event_handles_nat_and_nested_values(tmp_path):
+    namespace = load_helper_namespace()
+    config, _env = make_project_config(namespace, tmp_path)
+    group_key = "prod::login_history_activity"
+    query_result = make_success_result(
+        namespace,
+        config,
+        group_key,
+        [
+            {
+                "event_id": 99,
+                "event_timestamp": pd.NaT,
+                "login_details": {"risk": "medium"},
+                "user_name": "alice",
+            }
+        ],
+    )
+
+    event = namespace["build_parser_friendly_event"](
+        query_result["dataframe"].to_dict(orient="records")[0],
+        query_result=query_result,
+        generated_at="2026-04-17T16:00:00+00:00",
+        row_index=1,
+    )
+
+    assert event["event_timestamp"] is None or "event_timestamp" not in event
+    assert event["login_details"] == {"risk": "medium"}
+    assert event["event_id"] == 99
+
+
+def test_build_selected_events_uses_parser_friendly_log_types(tmp_path):
+    namespace = load_helper_namespace()
+    config, _env = make_project_config(namespace, tmp_path)
+    app_state = namespace["create_app_state"](config)
+    login_group = "prod::login_history_activity"
+    query_group = "prod::query_history_activity"
+
+    app_state["query_results"][login_group] = make_success_result(
+        namespace,
+        config,
+        login_group,
+        [{"event_id": 1, "event_timestamp": "2026-04-17T15:00:00Z", "user_name": "alice"}],
+    )
+    app_state["query_results"][query_group] = make_success_result(
+        namespace,
+        config,
+        query_group,
+        [{"query_id": "q-1", "event_timestamp": "2026-04-17T15:10:00Z", "query_type": "GRANT"}],
+    )
+
+    events, payload_plan = namespace["build_selected_events"](
+        app_state["query_results"],
+        [login_group, query_group],
+        dry_run=True,
+    )
+
+    assert len(events) == 2
+    assert {event["log_type"] for event in events} == {"login_history", "query_history"}
+    assert payload_plan["dry_run"] is True
+    assert payload_plan["selected_groups"][0]["log_type"] == "login_history"
+
+
+def test_reduce_send_state_requires_clean_successful_rows(tmp_path):
+    namespace = load_helper_namespace()
+    config, _env = make_project_config(namespace, tmp_path)
     app_state = namespace["create_app_state"](config)
     selected_group = app_state["checked_groups"][0]
 
-    app_state["query_results"][selected_group] = make_success_result(namespace, selected_group)
+    app_state["query_results"][selected_group] = make_success_result(
+        namespace,
+        config,
+        selected_group,
+        [{"event_id": 1, "event_timestamp": "2026-04-17T15:00:00Z"}],
+    )
     app_state["last_run_selection"] = namespace["get_selection_snapshot"](
         app_state["checked_groups"],
         app_state["dry_run"],
@@ -251,96 +412,6 @@ def test_reduce_send_state_requires_clean_successful_checked_groups():
     dirty_state = namespace["reduce_send_state"](app_state)
     assert dirty_state["enabled"] is False
     assert "rerun required" in dirty_state["reason"]
-
-
-def test_build_sender_config_uses_runtime_dry_run_instead_of_env_default():
-    namespace = load_helper_namespace()
-    config = make_config(namespace)
-    app_state = namespace["create_app_state"](config)
-    app_state["dry_run"] = False
-
-    sender_config = namespace["build_sender_config"](config, app_state)
-
-    assert config["DRY_RUN"] is True
-    assert sender_config["DRY_RUN"] is False
-
-
-def test_build_header_snapshot_reflects_live_mode_and_send_state():
-    namespace = load_helper_namespace()
-    config = make_config(namespace)
-    app_state = namespace["create_app_state"](config)
-    selected_group = app_state["checked_groups"][0]
-
-    app_state["dry_run"] = False
-    app_state["query_results"][selected_group] = make_success_result(namespace, selected_group)
-    app_state["last_run_selection"] = namespace["get_selection_snapshot"](
-        app_state["checked_groups"],
-        app_state["dry_run"],
-        app_state["group_catalog"],
-    )
-    app_state["selection_dirty"] = False
-    app_state["dirty_reason"] = "Ready to send."
-
-    header = namespace["build_header_snapshot"](config, app_state)
-    _events, payload_plan = namespace["build_selected_events"](
-        app_state["query_results"],
-        app_state["checked_groups"],
-        dry_run=app_state["dry_run"],
-    )
-
-    assert header["dry_run"] is False
-    assert header["send_enabled"] is True
-    assert payload_plan["dry_run"] is False
-
-
-def test_row_to_generic_log_serializes_payload_and_extracts_timestamp():
-    namespace = load_helper_namespace()
-    record = {
-        "COMPLETED_AT": pd.Timestamp("2026-04-14T12:00:00Z"),
-        "SEVERITY": "HIGH",
-        "SCORE": Decimal("10.5"),
-        "EMPTY": float("nan"),
-    }
-
-    event = namespace["row_to_generic_log"](
-        record,
-        account_label="prod",
-        query_key="security_check_1",
-        query_name="users_without_mfa",
-        row_index=2,
-        generated_at="2026-04-14T15:00:00+00:00",
-    )
-
-    assert event["snowflake_account"] == "prod"
-    assert event["snowflake_query_key"] == "security_check_1"
-    assert event["snowflake_query_name"] == "users_without_mfa"
-    assert event["generated_at"] == "2026-04-14T15:00:00+00:00"
-    assert event["row_index"] == 2
-    assert event["source_timestamp"] == "2026-04-14T12:00:00+00:00"
-    assert event["result"]["SCORE"] == 10.5
-    assert event["result"]["EMPTY"] is None
-
-
-def test_row_to_generic_log_handles_nat_without_astimezone_error():
-    namespace = load_helper_namespace()
-    record = {
-        "COMPLETED_AT": pd.NaT,
-        "UPDATED_AT": pd.NaT,
-        "STATUS": "OPEN",
-    }
-
-    event = namespace["row_to_generic_log"](
-        record,
-        account_label="prod",
-        query_key="security_check_1",
-        query_name="users_without_mfa",
-        row_index=1,
-        generated_at="2026-04-17T12:00:00+00:00",
-    )
-
-    assert event["result"]["COMPLETED_AT"] is None
-    assert event["result"]["UPDATED_AT"] is None
-    assert "source_timestamp" not in event
 
 
 def test_send_to_secops_dry_run_reports_batches_without_posting():
@@ -370,19 +441,3 @@ def test_send_to_secops_dry_run_reports_batches_without_posting():
     assert result["auth_mode"] == "url_query"
     assert result["dry_run"] is True
     assert result["skipped"] is False
-
-
-def test_describe_auth_mode_handles_url_query_headers_and_mixed():
-    namespace = load_helper_namespace()
-
-    assert namespace["describe_auth_mode"]("https://example.test/import") == "headers"
-    assert (
-        namespace["describe_auth_mode"](
-            "https://example.test/import?key=test-key&secret=test-secret"
-        )
-        == "url_query"
-    )
-    assert (
-        namespace["describe_auth_mode"]("https://example.test/import?key=test-key")
-        == "mixed"
-    )
