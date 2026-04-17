@@ -10,6 +10,7 @@ NOTEBOOK_PATH = (
 )
 HELPER_CELL_PREFIX = "# Cell 2 - Helpers and configuration"
 CONTROL_PANEL_CELL_PREFIX = "# Cell 3 - Unified control panel"
+REDESIGNED_CONTROL_PANEL_CELL_PREFIX = "# Cell 5"
 
 
 def load_notebook():
@@ -127,24 +128,68 @@ def make_success_result(namespace, config, group_key: str, rows: list[dict], sta
     return result
 
 
+def load_redesigned_control_panel_namespace(tmp_path: Path):
+    namespace = load_helper_namespace()
+    notebook = load_notebook()
+    config, _env = make_project_config(namespace, tmp_path)
+    namespace["CONFIG"] = config
+    namespace["APP_STATE"] = namespace["create_app_state"](config)
+    exec(find_code_cell_source(notebook, REDESIGNED_CONTROL_PANEL_CELL_PREFIX), namespace)
+    return namespace, config
+
+
+def seed_redesigned_control_panel_ready_state(namespace, config):
+    app_state = namespace["APP_STATE"]
+    selected_group = app_state["checked_groups"][0]
+    app_state["query_results"][selected_group] = make_success_result(
+        namespace,
+        config,
+        selected_group,
+        [{"event_id": 1, "event_timestamp": "2026-04-17T15:00:00Z"}],
+    )
+    app_state["last_run_selection"] = namespace["get_selection_snapshot"](
+        app_state["checked_groups"],
+        app_state["dry_run"],
+        app_state["group_catalog"],
+    )
+    app_state["selection_dirty"] = False
+    app_state["dirty_reason"] = "Ready to send."
+    namespace["_render"]()
+    return selected_group
+
+
 def test_notebook_json_is_valid():
     notebook = load_notebook()
     nbformat.validate(notebook)
 
 
-def test_notebook_has_domain_cards_and_run_table_ui():
+def test_notebook_has_legacy_and_redesigned_control_panel_ui():
     notebook = load_notebook()
 
-    assert len(notebook.cells) == 4
-    control_panel_source = find_code_cell_source(notebook, CONTROL_PANEL_CELL_PREFIX)
-    assert "DOMAIN_CARDS_BOX" in control_panel_source
-    assert "RUN_TABLE_BOX" in control_panel_source
-    assert "SelectMultiple" in control_panel_source
-    assert 'description="DRY_RUN"' in control_panel_source
-    assert 'description="Run Selected"' in control_panel_source
-    assert 'description="Send Selected to SecOps"' in control_panel_source
-    assert "Check Catalog" in control_panel_source
-    assert "Run Table" in control_panel_source
+    assert len(notebook.cells) >= 5
+
+    legacy_panel_source = find_code_cell_source(notebook, CONTROL_PANEL_CELL_PREFIX)
+    assert "DOMAIN_CARDS_BOX" in legacy_panel_source
+    assert "RUN_TABLE_BOX" in legacy_panel_source
+    assert "SelectMultiple" in legacy_panel_source
+    assert 'description="DRY_RUN"' in legacy_panel_source
+    assert 'description="Run Selected"' in legacy_panel_source
+    assert 'description="Send Selected to SecOps"' in legacy_panel_source
+    assert "Check Catalog" in legacy_panel_source
+    assert "Run Table" in legacy_panel_source
+
+    redesigned_panel_source = find_code_cell_source(
+        notebook, REDESIGNED_CONTROL_PANEL_CELL_PREFIX
+    )
+    assert "acct_boxes" in redesigned_panel_source
+    assert "check_boxes" in redesigned_panel_source
+    assert 'description="DRY RUN"' in redesigned_panel_source
+    assert 'description="Run Selected"' in redesigned_panel_source
+    assert 'description="Send to SecOps"' in redesigned_panel_source
+    assert "output_tabs = widgets.Tab" in redesigned_panel_source
+    assert 'output_tabs.set_title(0, "Run Log")' in redesigned_panel_source
+    assert 'output_tabs.set_title(1, "Preview")' in redesigned_panel_source
+    assert 'output_tabs.set_title(2, "SecOps Log")' in redesigned_panel_source
 
 
 def test_build_runtime_config_loads_sql_file_metadata_and_inline_fallback(tmp_path):
@@ -168,6 +213,41 @@ def test_build_runtime_config_loads_sql_file_metadata_and_inline_fallback(tmp_pa
     )
     assert config["SECURITY_CHECKS"][2]["chronicle_log_type"] == "custom_query"
     assert config["SECURITY_CHECKS"][2]["sql"] == "SELECT CURRENT_ACCOUNT() AS account_name"
+
+
+def test_redesigned_control_panel_clears_dirty_state_when_selection_is_restored(tmp_path):
+    namespace, config = load_redesigned_control_panel_namespace(tmp_path)
+    seed_redesigned_control_panel_ready_state(namespace, config)
+
+    namespace["check_boxes"]["query_history_activity"].value = False
+
+    assert namespace["APP_STATE"]["selection_dirty"] is True
+    assert "rerun required" in namespace["APP_STATE"]["dirty_reason"]
+    assert namespace["send_btn"].disabled is True
+
+    namespace["check_boxes"]["query_history_activity"].value = True
+
+    assert namespace["APP_STATE"]["selection_dirty"] is False
+    assert namespace["APP_STATE"]["dirty_reason"] == "Ready to send."
+    assert namespace["send_btn"].disabled is False
+
+
+def test_redesigned_control_panel_marks_mode_changes_dirty_until_restored(tmp_path):
+    namespace, config = load_redesigned_control_panel_namespace(tmp_path)
+    seed_redesigned_control_panel_ready_state(namespace, config)
+
+    original_dry_run = namespace["dry_run_btn"].value
+    namespace["dry_run_btn"].value = not original_dry_run
+
+    assert namespace["APP_STATE"]["selection_dirty"] is True
+    assert namespace["APP_STATE"]["dirty_reason"] == "Mode changed; rerun required before send."
+    assert namespace["send_btn"].disabled is True
+
+    namespace["dry_run_btn"].value = original_dry_run
+
+    assert namespace["APP_STATE"]["selection_dirty"] is False
+    assert namespace["APP_STATE"]["dirty_reason"] == "Ready to send."
+    assert namespace["send_btn"].disabled is False
 
 
 def test_load_environment_overrides_existing_secops_values_from_dotenv(tmp_path, monkeypatch):
