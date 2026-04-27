@@ -1,0 +1,48 @@
+flowchart TD
+    A[Start: New automation or material change submitted] --> B{Is it within an approved platform and approved boundary?}
+
+    B -- No --> Z1[Escalate to Full MSR / Enterprise Security Review]
+    B -- Yes --> C[Select automation type]
+
+    C --> C1[Power Platform App / Flow / Agent]
+    C --> C2[UiPath Automation]
+    C --> C3[Snowflake Python / Snowpark / Streamlit / SP / Notebook]
+    C --> C4[Other Internal Python Automation]
+
+    C1 --> D[Complete Core Intake + Platform Add-On]
+    C2 --> D
+    C3 --> D
+    C4 --> D
+
+    D --> E{Any immediate escalation conditions?}
+
+    E -- Yes --> Z2[Tier 3 / Enhanced Review or Full MSR]
+    E -- No --> F[Evaluate risk factors]
+
+    F --> F1[Data sensitivity]
+    F --> F2[Operational / business impact]
+    F --> F3[Integration complexity]
+    F --> F4[Privilege level]
+    F --> F5[Change management / monitoring readiness]
+
+    F1 --> G{Determine initial tier}
+    F2 --> G
+    F3 --> G
+    F4 --> G
+    F5 --> G
+
+    G -- Low --> T1[Tier 1]
+    G -- Medium --> T2[Tier 2]
+    G -- High --> T3[Tier 3]
+
+    T1 --> O1[Outcome: Register + Self-Attestation + Basic Controls]
+    T2 --> O2[Outcome: Mini MSR Review by CoE / Security Reviewer]
+    T3 --> O3[Outcome: Enhanced Review / Security + Privacy + Compliance]
+
+    O1 --> P[Record decision and owner]
+    O2 --> P
+    O3 --> P
+
+    P --> Q[Track remediation if needed]
+    Q --> R[Approve / Approve with Conditions / Escalate / Reject]
+    

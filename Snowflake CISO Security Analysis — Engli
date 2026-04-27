@@ -1,0 +1,235 @@
+Snowflake CISO Security Analysis — English Bullet Notes
+📊 Overview
+
+Platform: Snowflake
+Total findings: 14 (with duplicates across scanners preserved)
+Severity breakdown: Critical x2 | High x5 | Medium x7
+
+
+🔴 Group 3: Major Projects (Nuclear Zone)
+#1 — Migrate LEGACY SERVICE users away from password-only sign-ins
+
+Severity: Critical | Scanner: Security Essentials
+Current State: Legacy service accounts still authenticate via password only — no key pair, no OAuth. Front door key left in the lock.
+Remediation:
+
+Inventory all legacy service users
+Generate RSA key pair per account
+ALTER USER ... SET RSA_PUBLIC_KEY
+Update application connection strings to use key pair auth
+ALTER USER ... SET PASSWORD = NULL after validation
+Apply network policy to restrict source IPs
+
+
+Difficulty: Hard — requires multi-team coordination across every consuming app
+Side-Effect Score: 8/10
+Remediation Risk: Any missed app connection breaks production. Worst case: Critical ETL pipeline silently fails, downstream reports go stale, business decisions made on bad data.
+Risk of Not Fixing: Password can be brute-forced, phished, or reused from other breaches. Worst case: Attacker logs in as service account, exfiltrates customer PII to dark web.
+
+Prerequisites: Weak/leaked password • No network policy • No anomalous login detection
+
+
+Audit Exception: Service slated for retirement by [date]; compensating controls in place — IP allowlist, login alerts, 90-day password rotation.
+
+#2 — Migrate legacy service users away from password-only sign-ins (duplicate)
+
+Severity: Critical | Scanner: Threat Intelligence
+Same issue as #1, flagged by a second scanner. Roll into the same migration project.
+
+#7 — Ensure that legacy service users use key pair authentication
+
+Severity: High | Scanner: CIS Benchmarks
+Current State: Legacy service users have no RSA key pair configured — the flip side of #1/#2.
+Remediation:
+
+Generate 2048-bit RSA key pair per service user
+ALTER USER <user> SET RSA_PUBLIC_KEY='<key>'
+Switch app to private key connection
+Disable password after validation
+Set 180-day rotation reminder (ties to #10/#11)
+
+
+Difficulty: Hard — same coordination cost as #1
+Side-Effect Score: 8/10
+Remediation Risk: Service interruption during cutover. Worst case: Production outage.
+Risk of Not Fixing: Service accounts typically hold broad data access. Worst case: Account compromise → mass data exfiltration.
+
+Prerequisites: Weak/leaked password • Broad access scope • No IP restrictions
+
+
+Audit Exception: Rolled into unified migration plan with #1/#2; network policy + complexity rules + login monitoring as compensating controls.
+
+
+🟡 Group 2: Planned Initiatives
+#3 — Stored procedures owned by ACCOUNTADMIN/SECURITYADMIN
+
+Severity: High | Scanner: CIS Benchmarks
+Current State: Some SPs are owned by ACCOUNTADMIN/SECURITYADMIN, meaning callers can inherit excessive privilege via owner's-rights execution.
+Remediation:
+
+SHOW PROCEDURES and filter by owner
+Create dedicated functional role (e.g., SP_OWNER_ROLE)
+GRANT OWNERSHIP ON PROCEDURE ... TO ROLE <functional_role>
+Validate execution + dependencies
+Add RBAC guardrails to prevent recurrence
+
+
+Difficulty: Med — operationally simple but requires per-SP dependency analysis
+Side-Effect Score: 5/10
+Remediation Risk: SP may fail if internal logic depends on admin-only privileges. Worst case: Critical scheduled job breaks.
+Risk of Not Fixing: SQL injection or malicious modification executes with admin rights. Worst case: Attacker hijacks SP, gains full account control, wipes audit logs.
+
+Prerequisites: Injectable SP • Attacker can trigger execution • No SP change monitoring
+
+
+Audit Exception: Legacy artifacts from initial deployment; access to call these SPs already restricted by role. Ownership migration scheduled Q[X].
+
+#4 — SPs owned by ACCOUNTADMIN/SECURITYADMIN (duplicate of #3)
+
+Severity: High | Scanner: CIS Benchmarks
+Same issue, second detection. Handle in the same effort as #3.
+
+#5 — SPs run with ACCOUNTADMIN/SECURITYADMIN privileges
+
+Severity: High | Scanner: CIS Benchmarks
+Current State: SPs configured with EXECUTE AS OWNER where owner is a high-privilege role. Anyone who can call the SP effectively gets admin powers — worse than a shared password.
+Remediation:
+
+Audit EXECUTE AS settings across all SPs
+Switch to EXECUTE AS CALLER or transfer ownership to lower-privilege role
+Refactor SPs that genuinely need elevated privilege to use a dedicated, narrowly-scoped role
+Add SP privilege checks to CI/CD pipeline
+
+
+Difficulty: Hard — requires deep understanding of each SP's business logic
+Side-Effect Score: 6/10
+Remediation Risk: Permission model change may break previously-working operations. Worst case: Multiple business-critical SPs fail simultaneously, halting data processing.
+Risk of Not Fixing: Privilege escalation vector — any caller becomes a de facto admin. Worst case: Low-privilege user calls SP → bypasses all access controls.
+
+Prerequisites: USAGE granted broadly • Exploitable internal logic (e.g., dynamic SQL) • No call auditing
+
+
+Audit Exception: SPs perform genuinely privileged operations (e.g., cross-schema data movement); caller list restricted; ACCESS_HISTORY tracking enabled. Refactoring in planning.
+
+#6 — SPs run with admin role privileges (duplicate of #5)
+
+Severity: High | Scanner: CIS Benchmarks
+Same issue, second detection.
+
+#12 — Human users with passwords not subject to MFA enrollment policy
+
+Severity: Medium | Scanner: Security Essentials
+Current State: Some/all human users authenticating via password are not bound to an authentication policy requiring MFA. In 2026, this is hiking Everest in flip-flops.
+Remediation:
+
+CREATE AUTHENTICATION POLICY require_mfa SET MFA_AUTHENTICATION_METHODS=('TOTP') SET CLIENT_TYPES=(...)
+Apply at account level: ALTER ACCOUNT SET AUTHENTICATION POLICY require_mfa
+Notify users to enroll (Duo/TOTP)
+Define grace period, then enforce
+
+
+Difficulty: Med — technically simple, change management is the hard part
+Side-Effect Score: 5/10
+Remediation Risk: Users locked out if they don't enroll in time → helpdesk ticket flood. Worst case: Mass lockout disrupts business; leadership escalation.
+Risk of Not Fixing: Phished/leaked passwords give attackers single-factor entry. Worst case: Privileged user phished → attacker logs in unchallenged → bulk data exfil.
+
+Prerequisites: Successful phish/leak • Privileged data access • No anomaly detection
+
+
+Audit Exception: Phased rollout in progress, [X%] complete. IP allowlisting + shorter session timeouts as compensating controls. 100% target by [date].
+
+#13 — MFA enrollment policy (duplicate of #12)
+
+Severity: Medium | Scanner: Security Essentials
+Same issue, second detection.
+
+
+🟢 Group 1: Quick Wins
+#8 — ACCOUNTADMIN/SECURITYADMIN granted to a custom role
+
+Severity: High | Scanner: CIS Benchmarks
+Current State: Admin role granted into a custom role, contaminating the inheritance chain. Every member of that custom role is silently a superuser. Like leaving the company seal in a shared drawer.
+Remediation:
+
+SHOW GRANTS OF ROLE ACCOUNTADMIN / SECURITYADMIN
+Identify offending custom roles
+REVOKE ROLE ACCOUNTADMIN FROM ROLE <custom_role>
+Redesign custom role with least-privilege grants
+Validate impacted user workflows
+
+
+Difficulty: Easy — one REVOKE, but confirm blast radius first
+Side-Effect Score: 4/10
+Remediation Risk: Users relying on inherited privileges lose access. Worst case: Admin can't perform emergency ops mid-incident.
+Risk of Not Fixing: Massive least-privilege violation. Worst case: A user who should have read-only inadvertently or maliciously drops a database.
+
+Prerequisites: Custom role granted broadly • User aware of inherited power • No DDL alerting
+
+
+Audit Exception: Custom role granted only to [N] core DBAs who legitimately need admin access. Dedicated admin role under design, completion by [date].
+
+#9 — ACCOUNTADMIN/SECURITYADMIN granted to custom role (duplicate of #8, Medium)
+
+Severity: Medium | Scanner: CIS Benchmarks
+Same issue, lower severity (likely smaller scope of role usage).
+
+#10 — Authentication key pairs not rotated every 180 days
+
+Severity: Medium | Scanner: CIS Benchmarks
+Current State: Service account RSA key pairs older than 180 days. Like expired bento — looks fine, risk grows daily.
+Remediation:
+
+Build rotation automation (script/scheduler)
+Generate new RSA key pair
+ALTER USER ... SET RSA_PUBLIC_KEY_2='<new_key>' (Snowflake supports dual keys)
+Switch app to new private key
+Unset old key after validation
+Schedule recurring 180-day rotation
+
+
+Difficulty: Med — upfront automation effort, then hands-off
+Side-Effect Score: 3/10
+Remediation Risk: Botched rotation can briefly break auth. Worst case: Buggy script unsets old key before new key is set → service account fully locked out.
+Risk of Not Fixing: Stale keys give attackers a long exploitation window if leaked. Worst case: Private key accidentally committed to public Git repo, undetected for months due to no rotation cadence.
+
+Prerequisites: Poor key storage hygiene • No key-usage anomaly detection • Slow leak discovery
+
+
+Audit Exception: Current keys under [X] days old; rotation scheduled next maintenance window. Automation pipeline launching [date]. Private keys stored in secrets manager.
+
+#11 — Key pair rotation (duplicate of #10)
+
+Severity: Medium | Scanner: CIS Benchmarks
+Same issue, second detection.
+
+#14 — Users with ACCOUNTADMIN/SECURITYADMIN as default role
+
+Severity: Medium | Scanner: CIS Benchmarks
+Current State: Some users have DEFAULT_ROLE set to ACCOUNTADMIN/SECURITYADMIN — they operate at max privilege every session. Like carrying nuclear launch keys to buy breakfast.
+Remediation:
+
+SHOW USERS filter by DEFAULT_ROLE
+ALTER USER <user> SET DEFAULT_ROLE = '<appropriate_role>'
+Establish lower-privilege functional role for daily work
+Train users to USE ROLE ACCOUNTADMIN only when needed
+Consider session policies to time-bound elevated role usage
+
+
+Difficulty: Easy — one ALTER USER per account
+Side-Effect Score: 2/10
+Remediation Risk: Users may forget to elevate when needed. Worst case: Admin loses time mid-incident switching roles.
+Risk of Not Fixing: Every routine action runs with full admin power; any fat-finger has account-wide impact. Worst case: Untested DROP/DELETE wipes a production database.
+
+Prerequisites: Lack of pre-change verification • No DDL approval workflow • Weak backup recovery
+
+
+Audit Exception: Only [N] senior DBAs affected, all trained on privileged account management. Adjustment scheduled for next maintenance window; role-switching SOP being documented.
+
+
+🎯 Recommended Execution Order
+
+This week: Knock out all Group 1 quick wins (#8, #9, #10, #11, #14) — minutes of effort, meaningful risk reduction
+Next 2 weeks: Kick off Group 3 nuclear-zone migration project (#1, #2, #7) — Critical severity demands urgency
+Next sprint: Tackle Group 2 SP ownership/execution work (#3–#6) and MFA rollout (#12, #13) with proper change management
+
+The Excel version with full color-coded tables is still available from the previous message if you need the structured format for your steering committee deck. 📊
