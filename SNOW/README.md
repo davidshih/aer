@@ -5,6 +5,7 @@ This directory contains the standalone Snowflake security-check notebook and the
 ## Files
 
 - `snowflake_trust_center_to_secops.ipynb`: Main standalone notebook for running Snowflake checks and sending selected results to Google SecOps.
+- `snowflake_secops_daily_runner.py`: Headless runner for cron jobs using `.env` account and check selection.
 - `snowflake_connection_diagnostics.ipynb`: Connectivity and credential diagnostics for Snowflake accounts.
 - `sql_checks/`: SQL checks with metadata headers consumed by the notebook runtime.
 - `tests/test_snowflake_secops_notebook.py`: Regression tests for notebook helpers and control-panel behavior.
@@ -54,15 +55,32 @@ Copy `.env.example` to `.env` and set:
 - `SECURITY_CHECK_NAME_<N>` plus either `SECURITY_CHECK_SQL_FILE_<N>` or `SECURITY_CHECK_SQL_<N>`
 - `SECOPS_WEBHOOK_URL`
 - `SECOPS_API_KEY` and `SECOPS_WEBHOOK_SECRET` when the webhook URL does not already include `key=` and `secret=`
+- `SELECTED_ACCOUNTS` and `SELECTED_CHECKS` for the headless runner. Use comma-separated labels/keys or `all`.
 
 Relative SQL file paths are resolved from this directory.
+
+## Daily Cron Runner
+
+Run the selected accounts and checks without the notebook UI:
+
+```bash
+python snowflake_secops_daily_runner.py
+```
+
+Use a custom config path when cron runs from another directory:
+
+```bash
+python /path/to/SNOW/snowflake_secops_daily_runner.py --env /path/to/SNOW/.env
+```
+
+The runner is non-interactive. It exits with code 1 for missing config, unknown selections, or selected query errors. `DRY_RUN=true` executes the queries and prints the SecOps payload preview without posting; `DRY_RUN=false` posts eligible events to Google SecOps.
 
 ## Testing
 
 Run the notebook regression tests with:
 
 ```bash
-pytest -q tests/test_snowflake_secops_notebook.py
+pytest -q tests/test_snowflake_secops_notebook.py tests/test_snowflake_secops_daily_runner.py
 ```
 
 These tests validate notebook JSON integrity, helper behavior, legacy UI coverage, and redesigned Cell 5 state-sync behavior.
