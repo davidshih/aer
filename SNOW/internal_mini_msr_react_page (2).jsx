@@ -19,9 +19,173 @@ function makeControl({
   fields = ["Evidence / notes"],
   deepDive = [],
   failIf = [],
+  baseline = false,
+  owner = "",
 }) {
-  return { title, severity, required, description, steps, evidence, remediation, fields, deepDive, failIf };
+  return { title, severity, required, description, steps, evidence, remediation, fields, deepDive, failIf, baseline, owner };
 }
+
+const baselineSection = {
+  id: "control-baseline",
+  title: "Control Baseline — Required First",
+  icon: "🏛️",
+  controls: [
+    makeControl({
+      title: "ServiceNow CMDB Registration",
+      severity: "Low",
+      required: true,
+      baseline: true,
+      owner: "IT / Dev",
+      description: "The application or automation must be registered in ServiceNow CMDB with owner, dependencies, environment, and support information documented before review completion.",
+      steps: ["Confirm CMDB record exists.", "Verify business owner, technical owner, support owner, dependencies, platform, and environment are documented.", "Confirm ServiceNow CHG or RIM/SOW reference is linked when applicable."],
+      deepDive: ["For Tier 2/3, dependencies should include upstream/downstream systems, service accounts, APIs, queues, stages, and monitoring sources.", "For production workloads, confirm environment classification and operational owner are not blank."],
+      evidence: ["ServiceNow CMDB record", "ServiceNow RIM/SOW or intake reference", "Owner/dependency/environment fields"],
+      remediation: "Create or update the ServiceNow CMDB record before approval. Do not approve orphaned production automation.",
+      failIf: ["No CMDB record exists for a production workload.", "Owner, environment, or dependency information is missing."],
+      fields: ["ServiceNow CMDB record", "Business owner", "Technical owner", "Dependencies", "Environment", "Support group", "RIM/SOW or intake reference"],
+    }),
+    makeControl({
+      title: "Network / Data Flow Diagram",
+      severity: "Medium",
+      required: true,
+      baseline: true,
+      owner: "IT / IAM / InfoSec",
+      description: "A network and data flow diagram must show flows between systems, protocols, ports, encryption, credentials or identities used, and data classification labels.",
+      steps: ["Provide diagram in Visio, draw.io, Lucidchart, or equivalent.", "Show source, destination, intermediate storage, protocols, ports, encryption, and credentials/identities used.", "Label sensitive data and approved platform boundary."],
+      deepDive: ["For Tier 2/3, include shadow/intermediate storage such as SharePoint Lists, OneDrive files, queues, Snowflake stages, Blob/S3 landing files, and logs.", "TLS 1.2+ should be minimum; TLS 1.3 is preferred where supported.", "If public or cross-tenant traffic exists, identify gateway, APIM, WAF, private endpoint, firewall rule, or equivalent control."],
+      evidence: ["Network diagram", "Data flow diagram", "Protocol/port/encryption annotations", "Credential/identity annotations"],
+      remediation: "Create a diagram before approval. If the data path cannot be explained, the review cannot be completed.",
+      failIf: ["No diagram exists for a Tier 2/3 or production workload.", "Diagram omits intermediate storage, credentials, ports, protocols, or encryption.", "Data flow leaves approved boundary without approval."],
+      fields: ["Diagram link", "Protocols", "Ports", "Encryption", "Credentials / identities used", "Intermediate storage", "Approved boundary notes"],
+    }),
+    makeControl({
+      title: "Dedicated Service Account / Non-Interactive Identity",
+      severity: "Medium",
+      required: true,
+      baseline: true,
+      owner: "IT / IAM / InfoSec",
+      description: "Automation should use a dedicated non-interactive identity such as service account, service principal, managed identity, robot account, or Snowflake execution role with least privilege per environment.",
+      steps: ["Identify identity used in each environment.", "Confirm it is not a developer personal account.", "Confirm least-privilege role and environment separation.", "Confirm MFA/conditional access policy where applicable for human/admin access."],
+      deepDive: ["For Snowflake, provide SHOW GRANTS TO ROLE <execution_role> output.", "For Power Platform, identify connection owner and whether it is user-delegated or service identity.", "For UiPath, confirm unattended robot does not use developer personal Windows account."],
+      evidence: ["SHOW GRANTS screenshot", "Azure AD / Entra ID policy", "Service account record", "Robot account record", "Role grant evidence"],
+      remediation: "Create dedicated least-privilege identities per environment and remove personal-account execution.",
+      failIf: ["Production automation runs under a developer personal account.", "Service account has broad admin/export/write permissions without approval.", "Same identity is reused across environments without justification."],
+      fields: ["Identity type", "DEV identity", "TEST identity", "PROD identity", "Least-privilege role", "MFA / CA policy", "Grants evidence"],
+    }),
+    makeControl({
+      title: "API Key Storage in Delinea / Enterprise PAM",
+      severity: "Critical",
+      required: true,
+      baseline: true,
+      owner: "IT / Dev / InfoSec",
+      description: "API keys and long-lived secrets must be stored in Delinea or the approved enterprise PAM/vault. Platform-native secrets such as Snowflake Secrets are acceptable when approved and access-controlled.",
+      steps: ["Confirm API keys are not stored in source code, config, run history, notebook, XAML, or exported package.", "Verify Delinea/PAM or approved secret store configuration.", "Confirm access to the secret is least privilege and audited."],
+      deepDive: ["For Snowflake, provide CREATE SECRET DDL and grants, or approved external vault configuration.", "For UiPath, provide Orchestrator Asset, CyberArk, Azure Key Vault, HashiCorp Vault, or credential proxy evidence.", "For Power Platform, verify connector/API credentials are not exposed in URL, header text, or flow run history."],
+      evidence: ["Delinea config screenshot", "CREATE SECRET DDL + grants", "Vault/PAM access policy", "Secret scanner result"],
+      remediation: "Move API keys to Delinea or approved vault, rotate exposed keys, and restrict read permissions.",
+      failIf: ["API key appears in code, config, run history, logs, exported package, or notebook.", "Secret store access is broad or unaudited.", "Vault/PAM bootstrap credential is hardcoded."],
+      fields: ["Secret type", "Delinea / PAM record", "Snowflake CREATE SECRET DDL", "Vault grants", "Access policy", "Secret scanner result"],
+    }),
+    makeControl({
+      title: "API Key / Secret Rotation",
+      severity: "Critical",
+      required: true,
+      baseline: true,
+      owner: "Dev / AppSec",
+      description: "API keys and long-lived secrets require at least yearly rotation with documented schedule, runbook, and change records. Immediate rotation is required if a secret entered Git, logs, screenshots, or packages.",
+      steps: ["Confirm yearly rotation schedule exists.", "Confirm rotation runbook exists.", "Confirm ServiceNow CHG tickets or equivalent change records exist for prior/planned rotations."],
+      deepDive: ["For Tier 2/3, include emergency rotation procedure and dependency impact.", "If the secret has ever been exposed, rotation must be immediate; deletion from code is not enough.", "Confirm downstream systems can tolerate rotation without outage."],
+      evidence: ["Rotation schedule document", "Rotation runbook", "ServiceNow CHG tickets", "Last rotation evidence"],
+      remediation: "Create rotation runbook and schedule. Rotate exposed or unknown-age secrets before approval.",
+      failIf: ["No rotation schedule exists for API keys or long-lived secrets.", "Exposed secret was not rotated.", "No owner exists for rotation."],
+      fields: ["Secret/API key", "Rotation owner", "Rotation frequency", "Last rotation date", "Next rotation date", "Runbook link", "ServiceNow CHG"],
+    }),
+    makeControl({
+      title: "SIEM Integration — Purview to Google SecOps",
+      severity: "Medium",
+      required: true,
+      baseline: true,
+      owner: "InfoSec / Logging",
+      description: "Logging and monitoring must be enabled for applicable platforms. For Power Platform, logs should be enabled in Microsoft Purview and integrated or searchable in Google SecOps where applicable.",
+      steps: ["Confirm Power Platform log source is enabled in Purview where applicable.", "Confirm events are forwarded, imported, or searchable in Google SecOps.", "Confirm alerting or detection exists for high-risk activity or failure conditions."],
+      deepDive: ["For Tier 2/3, provide Google SecOps search screenshot for the AppID/workload/user or connector activity.", "For Tier 2/3, provide test alert evidence or alert configuration.", "If not applicable, document alternate log source and SIEM/search location."],
+      evidence: ["Purview log enablement screenshot", "Google SecOps search screenshot", "Alert configuration", "Test alert evidence"],
+      remediation: "Enable platform logging, route/search logs in Google SecOps, and configure alerts for failures or suspicious activity.",
+      failIf: ["No searchable logs exist for a production Tier 2/3 workload.", "Sensitive data appears in logs.", "Critical automation failure has no alert or owner."],
+      fields: ["Purview log enabled", "Google SecOps search", "Alert config", "Test alert evidence", "Retention", "Log owner"],
+    }),
+    makeControl({
+      title: "SAST / SCA — Snyk Scan",
+      severity: "Medium",
+      required: true,
+      baseline: true,
+      owner: "Dev / AppSec",
+      description: "Python code and dependencies must be scanned for vulnerabilities. High/Critical findings should block deployment unless formally accepted with remediation plan.",
+      steps: ["Run Snyk or approved SAST/SCA scan for code and dependencies.", "Confirm High/Critical findings block deployment or have documented exception.", "Link remediation tickets for open findings."],
+      deepDive: ["For Snowflake Python or other Python automation, include dependency file and pipeline scan step.", "For UiPath/Power Platform exported artifacts, include applicable secret/config scan where SAST/SCA is limited.", "For Tier 3, require AppSec disposition for unresolved High/Critical findings."],
+      evidence: ["Snyk scan results", "Azure Pipeline YAML", "Jira remediation tickets", "Exception approval"],
+      remediation: "Fix High/Critical findings, pin/upgrade dependencies, or document AppSec-approved exception before deployment.",
+      failIf: ["High/Critical vulnerability is unresolved without exception.", "No scan is run for code/dependencies where scanning is technically feasible.", "Pipeline does not block or flag High/Critical findings."],
+      fields: ["Snyk result", "Pipeline YAML", "High/Critical findings", "Block deployment?", "Jira tickets", "Exception approval"],
+    }),
+    makeControl({
+      title: "Application Security Scope Determination",
+      severity: "Low",
+      required: true,
+      baseline: true,
+      owner: "Vendor / InfoSec",
+      description: "Determine whether additional application security testing is required. Some workloads are not external-facing web applications and rely on vendor-managed platform testing, but the application-specific configuration still needs review.",
+      steps: ["Determine whether the workload is external-facing, customer-facing, internet-exposed, or custom web/API code.", "If not external-facing and platform testing is vendor-managed, document rationale for N/A.", "If custom external-facing web/API exists, escalate to appropriate AppSec testing."],
+      deepDive: ["For Tier 2/3, document why platform-managed testing is sufficient or why additional AppSec testing is required.", "External endpoints, public agents, custom APIs, Streamlit apps, or custom web front ends should not be auto-marked N/A."],
+      evidence: ["Scope rationale", "Vendor/platform testing statement", "Architecture review", "No customer action required note"],
+      remediation: "Escalate to AppSec testing if custom external-facing web/API code exists or if platform-managed scope does not cover the exposed functionality.",
+      failIf: ["External-facing custom web/API exists but AppSec testing is marked N/A without rationale.", "Reviewer cannot determine exposure scope."],
+      fields: ["External-facing?", "Customer-facing?", "Custom web/API?", "Vendor-managed testing rationale", "No customer action required note", "Evidence link"],
+    }),
+    makeControl({
+      title: "Penetration Testing Determination",
+      severity: "Low",
+      required: true,
+      baseline: true,
+      owner: "Vendor / InfoSec",
+      description: "Penetration testing is typically N/A for non-external-facing workloads built entirely on vendor-managed platforms, but the N/A decision must be documented.",
+      steps: ["Determine whether the workload exposes a public web app, API, agent, or endpoint.", "If no external-facing web/API and platform testing is vendor-managed, document N/A rationale.", "If exposure exists, route to penetration testing or full AppSec review."],
+      deepDive: ["For Tier 3, do not rely solely on vendor-managed platform testing if the team built custom public endpoints, custom API logic, or high-risk external integrations.", "Document boundary between vendor-managed platform testing and customer-owned application configuration."],
+      evidence: ["N/A rationale", "Vendor-managed platform testing note", "Architecture/exposure review", "No customer action required"],
+      remediation: "Schedule penetration testing or enhanced AppSec review when external-facing custom functionality exists.",
+      failIf: ["Public endpoint or custom API exists and penetration testing is marked N/A without compensating review.", "No exposure review evidence exists."],
+      fields: ["Pentest required?", "N/A rationale", "External exposure", "Vendor-managed scope", "No customer action required note", "Evidence link"],
+    }),
+    makeControl({
+      title: "Azure DevOps Git Repository and Branch Protection",
+      severity: "Medium",
+      required: true,
+      baseline: true,
+      owner: "Dev",
+      description: "Code, configuration, exported artifacts, notebooks, and automation definitions should be stored in Azure DevOps Git with branch protection and deployment through CI/CD only.",
+      steps: ["Confirm repository exists in Azure DevOps Git.", "Confirm branch protection, PR review, and commit history are available.", "Confirm deployment is via CI/CD pipeline only where technically feasible."],
+      deepDive: ["For Tier 2/3, require branch policies such as reviewer approval and restricted direct push to main.", "For Power Platform and UiPath, exported solutions/packages/project files should be represented in source control.", "For Snowflake/Python, notebook/procedure/script code should be synced or exported to repo."],
+      evidence: ["Git repo screenshot", "Branch policies", "Commit history", "Pipeline YAML", "PR review"],
+      remediation: "Move artifacts into Azure DevOps Git and require branch protection and CI/CD deployment before approval.",
+      failIf: ["Production code or automation definition is not recoverable from source control.", "Direct production edits bypass review for Tier 2/3 workload.", "No branch protection exists for production branch."],
+      fields: ["Azure DevOps repo", "Branch policy", "Commit history", "Pipeline YAML", "CI/CD only?", "PR evidence"],
+    }),
+    makeControl({
+      title: "ServiceNow Change Control / CAB Validation",
+      severity: "Medium",
+      required: true,
+      baseline: true,
+      owner: "IT / Dev",
+      description: "Production deployment or material change should have ServiceNow CHG record, CAB evidence where applicable, and pipeline change validation.",
+      steps: ["Confirm ServiceNow CHG ticket exists for production deployment or material change.", "Confirm CAB approval or standard change classification where applicable.", "Confirm pipeline validates or references the change record before deployment."],
+      deepDive: ["For Tier 2/3, link deployment record, CAB minutes, and pipeline run evidence.", "Emergency changes should have retroactive approval and incident/change linkage.", "Material changes should trigger re-review if data, API, privilege, external exposure, or business impact changes."],
+      evidence: ["ServiceNow CHG ticket", "CAB meeting minutes", "Pipeline CHG validation", "Deployment record"],
+      remediation: "Create or link the change record and enforce change validation in deployment pipeline.",
+      failIf: ["Production change has no CHG record or approved standard change path.", "Pipeline/deployment bypasses change approval for Tier 2/3 workload.", "Material change did not trigger re-review."],
+      fields: ["ServiceNow CHG", "CAB minutes", "Standard change?", "Pipeline validation", "Deployment record", "Material change review"],
+    }),
+  ],
+};
 
 const sharedSections = [
   {
@@ -1067,6 +1231,7 @@ function minTierForControl(control) {
 
 function controlAppliesToTier(control, tierLevel) {
   if (tierLevel === 4) return false;
+  if (control.baseline) return true;
   return minTierForControl(control) <= tierLevel;
 }
 
@@ -1099,7 +1264,7 @@ export default function InternalMiniMsrPage() {
   const tier = tierInfo(tierLevel);
 
   const rawSections = useMemo(() => {
-    return [...sharedSections, ...(platformSections[selectedPlatform] || [])];
+    return [baselineSection, ...sharedSections, ...(platformSections[selectedPlatform] || [])];
   }, [selectedPlatform]);
 
   const reviewSections = useMemo(() => {
@@ -1505,7 +1670,7 @@ export default function InternalMiniMsrPage() {
             </aside>
 
             <section className="space-y-6"><div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm"><div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between"><div><h2 className="text-xl font-bold">{selectedPlatformInfo.icon} {selectedPlatformInfo.label} Controls</h2><p className="mt-1 text-sm text-slate-600">Checks shown here are adjusted by the current tier. Open a group, expand a control, enter evidence, add context, then set status at the bottom.</p></div><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search controls..." className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none focus:bg-white focus:ring-4 focus:ring-slate-300 sm:max-w-sm" /></div></div>
-              {filteredSections.map((section) => { const sectionOpen = Boolean(openGroups[section.id]); const sectionRows = section.controls.map((control) => rowFor(section.id, control.title)).filter(Boolean); const sectionAttention = sectionRows.filter((row) => ["Fail", "Partial"].includes(statusOf(row))).length; const sectionReviewed = sectionRows.filter((row) => statusOf(row) !== "Not Reviewed").length; return (<div key={section.id} className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm"><button type="button" onClick={() => setOpenGroups((prev) => ({ ...prev, [section.id]: !sectionOpen }))} className="flex w-full items-center justify-between gap-4 p-5 text-left hover:bg-slate-50"><div className="flex items-center gap-4"><div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-slate-100 text-xl">{section.icon}</div><div><div className="text-lg font-bold">{section.title}</div><div className="mt-1 text-sm text-slate-500">{sectionReviewed}/{sectionRows.length} reviewed · {sectionAttention} attention</div></div></div><span className="text-xl text-slate-400">{sectionOpen ? "▴" : "▾"}</span></button>{sectionOpen && (<div className="space-y-4 border-t border-slate-100 bg-slate-50 p-4">{section.controls.map((control) => { const row = rowFor(section.id, control.title); if (!row) return null; const status = statusOf(row); const cardOpen = Object.prototype.hasOwnProperty.call(openCards, row.id) ? Boolean(openCards[row.id]) : status === "Not Reviewed"; const meta = statusMeta(status); return (<article key={row.id} className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm"><div className="flex items-center gap-4 border-b border-slate-100 px-5 py-4"><div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full border-2 border-slate-300 text-sm font-bold text-slate-400">{meta.icon}</div><div className="w-10 shrink-0 text-lg font-semibold text-slate-400">{String(row.number).padStart(2, "0")}</div><button type="button" onClick={() => setOpenCards((prev) => ({ ...prev, [row.id]: !cardOpen }))} className="min-w-0 flex-1 text-left"><div className="flex flex-wrap items-center gap-2"><span className="text-lg font-bold text-slate-950">{control.title}</span><span className={cx("rounded-xl border px-3 py-1 text-xs font-bold tracking-wide", severityClass(control.severity))}>{control.severity.toUpperCase()}</span><span className={cx("rounded-xl border px-3 py-1 text-xs font-bold tracking-wide", control.required ? "border-slate-300 bg-slate-950 text-white" : "border-slate-200 bg-slate-100 text-slate-700")}>{control.required ? "REQUIRED" : "OPTIONAL"}</span><span className="rounded-xl border border-indigo-200 bg-indigo-50 px-3 py-1 text-xs font-bold tracking-wide text-indigo-700">TIER {minTierForControl(control)}+</span><span className={cx("rounded-xl border px-3 py-1 text-xs font-bold tracking-wide", meta.color)}>{meta.label.toUpperCase()}</span></div></button><button type="button" onClick={() => setOpenCards((prev) => ({ ...prev, [row.id]: !cardOpen }))} className="rounded-full border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-bold text-slate-500 hover:bg-slate-100">{cardOpen ? "▴" : "ⓘ"}</button></div>{cardOpen && (<div className="px-5 py-5"><div className="grid gap-6 xl:grid-cols-[1fr_360px]"><div><section><div className="text-sm font-bold uppercase tracking-[0.18em] text-slate-500">Description</div><p className="mt-2 text-sm leading-6 text-slate-700">{control.description}</p></section><section className="mt-6"><div className="text-sm font-bold uppercase tracking-[0.18em] text-slate-500">Verification Steps</div><ol className="mt-2 space-y-1.5 text-sm leading-6 text-slate-600">{control.steps.map((step, index) => (<li key={step} className="flex gap-4"><span className="w-6 shrink-0 text-slate-400">{index + 1}.</span><span>{step}</span></li>))}</ol></section>{control.deepDive && control.deepDive.length > 0 && (<section className="mt-6 rounded-2xl bg-purple-50 p-4"><div className="text-sm font-bold uppercase tracking-[0.18em] text-purple-700">Tier-Based Deep-Dive Checks</div><ul className="mt-2 space-y-1.5 text-sm leading-6 text-slate-700">{control.deepDive.map((item) => (<li key={item} className="flex gap-3"><span className="text-purple-500">◆</span><span>{item}</span></li>))}</ul></section>)}<section className="mt-6 rounded-2xl bg-blue-50 p-4"><div className="text-sm font-bold uppercase tracking-[0.18em] text-blue-700">Expected Evidence</div><p className="mt-2 text-sm leading-6 text-slate-700">{control.evidence.join(" · ")}</p></section>{control.failIf && control.failIf.length > 0 && (<section className="mt-4 rounded-2xl bg-red-50 p-4"><div className="text-sm font-bold uppercase tracking-[0.18em] text-red-700">Fail / Escalate If</div><ul className="mt-2 space-y-1.5 text-sm leading-6 text-slate-700">{control.failIf.map((item) => (<li key={item} className="flex gap-3"><span className="text-red-500">!</span><span>{item}</span></li>))}</ul></section>)}<section className="mt-4 rounded-2xl bg-emerald-50 p-4"><div className="text-sm font-bold uppercase tracking-[0.18em] text-emerald-700">Remediation Guidance</div><p className="mt-2 text-sm leading-6 text-slate-700">{control.remediation}</p></section></div><aside className="rounded-3xl border border-slate-200 bg-slate-50 p-4"><div className="space-y-3">{control.fields.map((field) => (<DetailInput key={`${row.id}::${field}`} label={field} initialValue={getDetail(row.id, field)} onSave={(newValue) => setDetail(row.id, field, newValue)} />))}</div><DetailTextArea label="Additional Information" initialValue={getDetail(row.id, "Additional information")} onSave={(newValue) => setDetail(row.id, "Additional information", newValue)} /><div className="mt-5 border-t border-slate-200 pt-4"><label className="block"><span className="text-sm font-semibold text-slate-500">Status</span><select value={status} onChange={(e) => updateStatus(row.id, e.target.value)} className={cx("mt-2 w-full rounded-xl border px-3 py-2 text-sm font-semibold outline-none focus:ring-4 focus:ring-slate-300", meta.color)}>{statuses.map((option) => (<option key={option} value={option}>{statusMeta(option).icon} {option}</option>))}</select></label><div className={cx("mt-4 rounded-2xl border p-4", meta.color)}><div className="flex items-center gap-2 text-sm font-bold"><span className={cx("h-2.5 w-2.5 rounded-full", meta.dot)} />{meta.label}</div><p className="mt-2 text-sm leading-6 opacity-90">{status === "Fail" && "Control is not satisfied. Add remediation owner and due date."}{status === "Partial" && "Control is partially satisfied. Add gap, compensating control, and due date."}{status === "Pass" && "Control appears satisfied. Add evidence reference."}{status === "N/A" && "Not applicable. Add reason why this does not apply."}{status === "Not Reviewed" && "No review result recorded yet."}</p></div></div></aside></div></div>)}</article>); })}</div>)}</div>); })}
+              {filteredSections.map((section) => { const sectionOpen = Boolean(openGroups[section.id]); const sectionRows = section.controls.map((control) => rowFor(section.id, control.title)).filter(Boolean); const sectionAttention = sectionRows.filter((row) => ["Fail", "Partial"].includes(statusOf(row))).length; const sectionReviewed = sectionRows.filter((row) => statusOf(row) !== "Not Reviewed").length; return (<div key={section.id} className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm"><button type="button" onClick={() => setOpenGroups((prev) => ({ ...prev, [section.id]: !sectionOpen }))} className="flex w-full items-center justify-between gap-4 p-5 text-left hover:bg-slate-50"><div className="flex items-center gap-4"><div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-slate-100 text-xl">{section.icon}</div><div><div className="text-lg font-bold">{section.title}</div><div className="mt-1 text-sm text-slate-500">{sectionReviewed}/{sectionRows.length} reviewed · {sectionAttention} attention</div></div></div><span className="text-xl text-slate-400">{sectionOpen ? "▴" : "▾"}</span></button>{sectionOpen && (<div className="space-y-4 border-t border-slate-100 bg-slate-50 p-4">{section.controls.map((control) => { const row = rowFor(section.id, control.title); if (!row) return null; const status = statusOf(row); const cardOpen = Object.prototype.hasOwnProperty.call(openCards, row.id) ? Boolean(openCards[row.id]) : status === "Not Reviewed"; const meta = statusMeta(status); return (<article key={row.id} className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm"><div className="flex items-center gap-4 border-b border-slate-100 px-5 py-4"><div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full border-2 border-slate-300 text-sm font-bold text-slate-400">{meta.icon}</div><div className="w-10 shrink-0 text-lg font-semibold text-slate-400">{String(row.number).padStart(2, "0")}</div><button type="button" onClick={() => setOpenCards((prev) => ({ ...prev, [row.id]: !cardOpen }))} className="min-w-0 flex-1 text-left"><div className="flex flex-wrap items-center gap-2"><span className="text-lg font-bold text-slate-950">{control.title}</span><span className={cx("rounded-xl border px-3 py-1 text-xs font-bold tracking-wide", severityClass(control.severity))}>{control.severity.toUpperCase()}</span><span className={cx("rounded-xl border px-3 py-1 text-xs font-bold tracking-wide", control.required ? "border-slate-300 bg-slate-950 text-white" : "border-slate-200 bg-slate-100 text-slate-700")}>{control.required ? "REQUIRED" : "OPTIONAL"}</span><span className="rounded-xl border border-indigo-200 bg-indigo-50 px-3 py-1 text-xs font-bold tracking-wide text-indigo-700">{control.baseline ? "BASELINE" : `TIER ${minTierForControl(control)}+`}</span><span className={cx("rounded-xl border px-3 py-1 text-xs font-bold tracking-wide", meta.color)}>{meta.label.toUpperCase()}</span></div></button><button type="button" onClick={() => setOpenCards((prev) => ({ ...prev, [row.id]: !cardOpen }))} className="rounded-full border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-bold text-slate-500 hover:bg-slate-100">{cardOpen ? "▴" : "ⓘ"}</button></div>{cardOpen && (<div className="px-5 py-5"><div className="grid gap-6 xl:grid-cols-[1fr_360px]"><div><section><div className="text-sm font-bold uppercase tracking-[0.18em] text-slate-500">Description</div><p className="mt-2 text-sm leading-6 text-slate-700">{control.description}</p></section><section className="mt-6"><div className="text-sm font-bold uppercase tracking-[0.18em] text-slate-500">Verification Steps</div><ol className="mt-2 space-y-1.5 text-sm leading-6 text-slate-600">{control.steps.map((step, index) => (<li key={step} className="flex gap-4"><span className="w-6 shrink-0 text-slate-400">{index + 1}.</span><span>{step}</span></li>))}</ol></section>{control.deepDive && control.deepDive.length > 0 && (<section className="mt-6 rounded-2xl bg-purple-50 p-4"><div className="text-sm font-bold uppercase tracking-[0.18em] text-purple-700">Tier-Based Deep-Dive Checks</div><ul className="mt-2 space-y-1.5 text-sm leading-6 text-slate-700">{control.deepDive.map((item) => (<li key={item} className="flex gap-3"><span className="text-purple-500">◆</span><span>{item}</span></li>))}</ul></section>)}<section className="mt-6 rounded-2xl bg-blue-50 p-4"><div className="text-sm font-bold uppercase tracking-[0.18em] text-blue-700">Expected Evidence</div><p className="mt-2 text-sm leading-6 text-slate-700">{control.evidence.join(" · ")}</p></section>{control.failIf && control.failIf.length > 0 && (<section className="mt-4 rounded-2xl bg-red-50 p-4"><div className="text-sm font-bold uppercase tracking-[0.18em] text-red-700">Fail / Escalate If</div><ul className="mt-2 space-y-1.5 text-sm leading-6 text-slate-700">{control.failIf.map((item) => (<li key={item} className="flex gap-3"><span className="text-red-500">!</span><span>{item}</span></li>))}</ul></section>)}<section className="mt-4 rounded-2xl bg-emerald-50 p-4"><div className="text-sm font-bold uppercase tracking-[0.18em] text-emerald-700">Remediation Guidance</div><p className="mt-2 text-sm leading-6 text-slate-700">{control.remediation}</p></section></div><aside className="rounded-3xl border border-slate-200 bg-slate-50 p-4"><div className="space-y-3">{control.fields.map((field) => (<DetailInput key={`${row.id}::${field}`} label={field} initialValue={getDetail(row.id, field)} onSave={(newValue) => setDetail(row.id, field, newValue)} />))}</div><DetailTextArea label="Additional Information" initialValue={getDetail(row.id, "Additional information")} onSave={(newValue) => setDetail(row.id, "Additional information", newValue)} /><div className="mt-5 border-t border-slate-200 pt-4"><label className="block"><span className="text-sm font-semibold text-slate-500">Status</span><select value={status} onChange={(e) => updateStatus(row.id, e.target.value)} className={cx("mt-2 w-full rounded-xl border px-3 py-2 text-sm font-semibold outline-none focus:ring-4 focus:ring-slate-300", meta.color)}>{statuses.map((option) => (<option key={option} value={option}>{statusMeta(option).icon} {option}</option>))}</select></label><div className={cx("mt-4 rounded-2xl border p-4", meta.color)}><div className="flex items-center gap-2 text-sm font-bold"><span className={cx("h-2.5 w-2.5 rounded-full", meta.dot)} />{meta.label}</div><p className="mt-2 text-sm leading-6 opacity-90">{status === "Fail" && "Control is not satisfied. Add remediation owner and due date."}{status === "Partial" && "Control is partially satisfied. Add gap, compensating control, and due date."}{status === "Pass" && "Control appears satisfied. Add evidence reference."}{status === "N/A" && "Not applicable. Add reason why this does not apply."}{status === "Not Reviewed" && "No review result recorded yet."}</p></div></div></aside></div></div>)}</article>); })}</div>)}</div>); })}
             </section>
           </main>
         )}
