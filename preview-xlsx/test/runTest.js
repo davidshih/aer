@@ -12,7 +12,9 @@ async function run() {
   const entries = [
     path.join(__dirname, 'parsers', 'csv.test.ts'),
     path.join(__dirname, 'parsers', 'xlsx.test.ts'),
-    path.join(__dirname, 'rendering.test.ts')
+    path.join(__dirname, 'security', 'parser.test.ts'),
+    path.join(__dirname, 'security', 'csp.test.ts'),
+    path.join(__dirname, 'security', 'rendering.test.ts')
   ].filter((p) => fs.existsSync(p));
 
   await esbuild.build({
@@ -23,13 +25,18 @@ async function run() {
     target: 'node18',
     format: 'cjs',
     sourcemap: true,
-    external: ['mocha', 'exceljs']
+    external: ['mocha', 'exceljs', 'jsdom', 'vscode']
   });
 
   const mocha = new Mocha({ ui: 'bdd', color: true, timeout: 20_000 });
-  for (const f of fs.readdirSync(outDir)) {
-    if (f.endsWith('.js')) mocha.addFile(path.join(outDir, f));
-  }
+  const walk = (dir) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (e.name.endsWith('.js')) mocha.addFile(p);
+    }
+  };
+  walk(outDir);
 
   await new Promise((resolve, reject) => {
     mocha.run((failures) => (failures > 0 ? reject(new Error(`${failures} failed`)) : resolve()));

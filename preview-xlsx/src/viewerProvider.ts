@@ -5,6 +5,7 @@ import { parseXlsx } from './parsers/xlsx';
 import { parseCsvFile } from './parsers/csv';
 import { LIMITS, LimitExceededError } from './limits';
 import { WorkbookData, ParseOptions } from './types';
+import { buildWebviewHtml } from './webviewHtml';
 
 const VIEW_TYPE = 'previewXlsx.viewer';
 
@@ -107,33 +108,16 @@ export class SpreadsheetViewerProvider implements vscode.CustomReadonlyEditorPro
 
   private buildHtml(webview: vscode.Webview): string {
     const nonce = crypto.randomBytes(16).toString('base64');
-    const scriptUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview.js')
-    );
-    const styleUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'styles.css')
-    );
-    const csp = [
-      `default-src 'none'`,
-      `script-src 'nonce-${nonce}'`,
-      `style-src 'nonce-${nonce}' ${webview.cspSource}`,
-      `img-src ${webview.cspSource} data:`,
-      `font-src ${webview.cspSource}`
-    ].join('; ');
-    return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="${csp}">
-<link rel="stylesheet" href="${styleUri}" nonce="${nonce}">
-<title>Spreadsheet Preview</title>
-</head>
-<body>
-<div id="status" role="status" aria-live="polite">Loading…</div>
-<div id="tabs" role="tablist"></div>
-<div id="grid"></div>
-<script nonce="${nonce}" src="${scriptUri}"></script>
-</body>
-</html>`;
+    return buildWebviewHtml({
+      scriptUri: webview
+        .asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview.js'))
+        .toString(),
+      styleUri: webview
+        .asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'styles.css'))
+        .toString(),
+      cspSource: webview.cspSource,
+      nonce
+    });
   }
 }
+

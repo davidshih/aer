@@ -1,0 +1,7 @@
+"=cmd|' /C calc'!A0",plain
+"@SUM(1)*cmd",plain
+"+HYPERLINK(""x"",""y"")",plain
+"-cmd|fake",plain
+" =SUM(1,1)",plain
+"	=cmd|tabbed",plain
+"=2+2",plain
