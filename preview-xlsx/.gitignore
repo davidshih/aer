@@ -2,6 +2,9 @@ node_modules/
 dist/
 out/
 out-test/
+out-e2e/
+.vscode-test/
+.vscode-test-user/
 *.vsix
 .DS_Store
 *.log

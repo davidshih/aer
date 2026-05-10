@@ -65,6 +65,7 @@
   "scripts": {
     "lint": "eslint src",
     "test": "node ./test/runTest.js",
+    "test:e2e": "node ./test/e2e/runE2E.js",
     "build": "node esbuild.js",
     "watch": "node esbuild.js --watch",
     "audit": "npm audit --omit=dev --audit-level=moderate",
