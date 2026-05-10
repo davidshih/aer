@@ -99,7 +99,7 @@ export class SpreadsheetViewerProvider implements vscode.CustomReadonlyEditorPro
         );
       }
       if (sheet.truncatedColumns) {
-        warnings.push(`File had >${1024} columns; extras dropped.`);
+        warnings.push(`File had >${LIMITS.columns} columns; extras dropped.`);
       }
       return { sheets: [sheet], warnings };
     }

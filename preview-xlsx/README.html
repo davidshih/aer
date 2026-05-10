@@ -83,7 +83,10 @@
       beginning with <code>=</code>/<code>@</code>/<code>+</code> are shown verbatim; the
       read-only renderer cannot execute them.</li>
   <li>External images, drawings, OLE objects, charts, conditional formatting, and VBA macros
-      are ignored by the parser.</li>
+      are <strong>not rendered and not exposed to the webview</strong>. The parser passes
+      <code>ignoreNodes</code> to ExcelJS to skip those parts where supported, but a malformed
+      workbook may still touch the underlying lib's parser code paths — the file-size cap
+      remains the primary backstop.</li>
   <li>The runtime makes <strong>no network calls</strong> and emits <strong>no telemetry</strong>.</li>
   <li><code>untrustedWorkspaces.supported = true</code>; the extension is safe in Restricted
       Mode because it never executes file content.</li>

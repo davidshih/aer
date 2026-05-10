@@ -42,7 +42,7 @@ different defaults (still capped by the hard maxes).
 - All cell values render via `textContent` — never `innerHTML`. Crafted cells containing markup display as plain text.
 - Hyperlinks render as plain text (no `<a href>`), defeating `javascript:`, `vbscript:`, and `file://` exfiltration.
 - Formulas are not evaluated; only cached values or formula text are read. CSV cells beginning with `=`/`@`/`+` are shown verbatim.
-- External images, drawings, OLE objects, charts, conditional formatting, and VBA macros are ignored.
+- External images, drawings, OLE objects, charts, conditional formatting, and VBA macros are not rendered and not exposed to the webview. The parser passes `ignoreNodes` to ExcelJS to skip those parts where supported, but a malformed workbook may still touch the underlying lib's parser code paths — the file-size cap remains the primary backstop.
 - Runtime makes **no network calls** and emits **no telemetry**.
 - `untrustedWorkspaces.supported = true`; safe in Restricted Mode because file content is never executed.
 

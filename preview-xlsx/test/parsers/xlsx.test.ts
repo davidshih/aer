@@ -20,7 +20,7 @@ async function makeWorkbook(rows: number, cols: number): Promise<string> {
 }
 
 describe('parseXlsx', () => {
-  it('reads cells as text via streaming', async () => {
+  it('reads cells as text', async () => {
     const file = await makeWorkbook(3, 2);
     const data = await parseXlsx(file, { maxRows: 100, maxFileSizeBytes: 5 * 1024 * 1024 });
     assert.strictEqual(data.sheets.length, 1);
