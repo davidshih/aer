@@ -1,0 +1,80 @@
+{
+  "name": "preview-xlsx",
+  "displayName": "Spreadsheet Preview",
+  "description": "Lightweight read-only preview for .xlsx, .csv and .tsv files with sort and filter. No network, no macros, no formula evaluation.",
+  "version": "0.1.0",
+  "license": "MIT",
+  "publisher": "local",
+  "private": true,
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onCustomEditor:previewXlsx.viewer"
+  ],
+  "contributes": {
+    "customEditors": [
+      {
+        "viewType": "previewXlsx.viewer",
+        "displayName": "Spreadsheet Preview",
+        "selector": [
+          { "filenamePattern": "*.xlsx" },
+          { "filenamePattern": "*.csv" },
+          { "filenamePattern": "*.tsv" }
+        ],
+        "priority": "option"
+      }
+    ],
+    "configuration": {
+      "title": "Spreadsheet Preview",
+      "properties": {
+        "previewXlsx.maxRows": {
+          "type": "number",
+          "default": 100000,
+          "maximum": 250000,
+          "minimum": 1000,
+          "description": "Maximum rows to load per sheet. Hard max 250000."
+        },
+        "previewXlsx.maxFileSizeMB": {
+          "type": "number",
+          "default": 50,
+          "maximum": 200,
+          "minimum": 1,
+          "description": "Refuse files larger than this size in megabytes. Hard max 200."
+        }
+      }
+    }
+  },
+  "capabilities": {
+    "untrustedWorkspaces": { "supported": true },
+    "virtualWorkspaces": false
+  },
+  "scripts": {
+    "lint": "eslint src",
+    "test": "node ./test/runTest.js",
+    "build": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "audit": "npm audit --omit=dev --audit-level=moderate",
+    "verify": "npm run lint && npm run build && npm run audit && npm run test",
+    "vscode:prepublish": "npm run build"
+  },
+  "dependencies": {
+    "exceljs": "4.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "20.14.10",
+    "@types/vscode": "1.85.0",
+    "@types/mocha": "10.0.7",
+    "@typescript-eslint/eslint-plugin": "7.18.0",
+    "@typescript-eslint/parser": "7.18.0",
+    "@vscode/test-electron": "2.5.2",
+    "esbuild": "0.25.0",
+    "eslint": "8.57.0",
+    "mocha": "10.8.2",
+    "typescript": "5.5.4"
+  }
+}

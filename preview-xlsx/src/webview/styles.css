@@ -1,0 +1,54 @@
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size);
+  color: var(--vscode-foreground);
+  background: var(--vscode-editor-background);
+}
+body { display: flex; flex-direction: column; }
+#status { padding: 4px 8px; font-size: 11px; opacity: 0.8; border-bottom: 1px solid var(--vscode-panel-border); }
+#tabs { display: flex; gap: 2px; padding: 4px 4px 0 4px; border-bottom: 1px solid var(--vscode-panel-border); flex-wrap: wrap; }
+.tab {
+  padding: 4px 10px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  border-bottom: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+.tab[aria-selected="true"] {
+  background: var(--vscode-tab-activeBackground);
+  border-color: var(--vscode-panel-border);
+}
+#grid { flex: 1; position: relative; overflow: auto; }
+table { border-collapse: collapse; width: max-content; min-width: 100%; }
+thead { position: sticky; top: 0; background: var(--vscode-editor-background); z-index: 1; }
+th, td {
+  border: 1px solid var(--vscode-panel-border);
+  padding: 2px 8px;
+  white-space: pre;
+  font-variant-numeric: tabular-nums;
+  max-width: 480px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+th { text-align: left; cursor: pointer; user-select: none; background: var(--vscode-editorWidget-background); }
+th .arrow { opacity: 0.6; margin-left: 4px; font-size: 10px; }
+tr.filter-row th { cursor: default; padding: 1px 2px; }
+tr.filter-row input {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  border: 1px solid var(--vscode-input-border, transparent);
+  font: inherit;
+  padding: 1px 4px;
+}
+.spacer { padding: 0; border: none; }
+tr.row-num td:first-child { color: var(--vscode-descriptionForeground); }
+.row-index { color: var(--vscode-descriptionForeground); text-align: right; }
+.warning { color: var(--vscode-editorWarning-foreground); }
+.error { color: var(--vscode-errorForeground); padding: 8px; }

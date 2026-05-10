@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Spreadsheet Preview — VS Code Extension</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 760px; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; color: #222; }
+  h1, h2 { border-bottom: 1px solid #ddd; padding-bottom: 4px; }
+  code, pre { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  pre { background: #f5f5f5; padding: 8px 12px; border-radius: 4px; overflow-x: auto; }
+  table { border-collapse: collapse; }
+  th, td { border: 1px solid #ccc; padding: 4px 8px; text-align: left; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; background: #eef; margin-right: 4px; }
+</style>
+</head>
+<body>
+
+<h1>Spreadsheet Preview</h1>
+<p>
+  <span class="badge">read-only</span>
+  <span class="badge">no network</span>
+  <span class="badge">no macros</span>
+  <span class="badge">no formula execution</span>
+</p>
+
+<p>
+  A lightweight, read-only preview for tabular files inside VS Code, with click-to-sort headers
+  and per-column substring filters. Designed to keep the security surface as small as possible.
+</p>
+
+<h2>Supported formats</h2>
+<ul>
+  <li><code>.xlsx</code> — modern Excel workbooks</li>
+  <li><code>.csv</code> — comma-separated, RFC 4180-ish</li>
+  <li><code>.tsv</code> — tab-separated</li>
+</ul>
+<p>
+  <code>.xls</code> (legacy BIFF) and <code>.xlsm</code> (macro-enabled) are deliberately
+  <strong>not</strong> supported.
+</p>
+
+<h2>Usage</h2>
+<ol>
+  <li>Right-click a supported file in the Explorer.</li>
+  <li>Choose <em>Open With…</em> &rarr; <em>Spreadsheet Preview</em>.</li>
+  <li>Click a column header to toggle sort (asc &rarr; desc &rarr; off).</li>
+  <li>Type into the per-column filter row to substring-filter (case-insensitive).</li>
+</ol>
+<p>
+  This viewer is not the default editor for any format; the built-in text editor still owns
+  CSV/TSV. Open this viewer explicitly via <em>Open With…</em>.
+</p>
+
+<h2>Limits and behaviour</h2>
+<p>
+  Limits are enforced before or during parsing. Behaviour depends on which limit is hit:
+</p>
+<table>
+  <thead><tr><th>Limit</th><th>Default</th><th>Hard max</th><th>Behaviour when exceeded</th></tr></thead>
+  <tbody>
+    <tr><td>File size</td><td>50 MB</td><td>200 MB</td><td><strong>Reject</strong> with error before reading body</td></tr>
+    <tr><td>Rows per sheet</td><td>100,000</td><td>250,000</td><td>Truncate; warning shown in status bar</td></tr>
+    <tr><td>Columns per sheet</td><td>1,024</td><td>1,024</td><td>Truncate; warning shown in status bar</td></tr>
+    <tr><td>Cell string length</td><td>32 KB</td><td>32 KB</td><td>Clamp with trailing ellipsis</td></tr>
+  </tbody>
+</table>
+<p>
+  Adjust <code>previewXlsx.maxRows</code> and <code>previewXlsx.maxFileSizeMB</code> in VS Code
+  settings if you need different defaults (still capped by the hard maxes).
+</p>
+
+<h2>Security model</h2>
+<ul>
+  <li>Strict CSP with a per-render nonce: no inline scripts, no <code>eval</code>, no remote
+      origins, no remote images.</li>
+  <li><code>localResourceRoots</code> restricted to the extension's <code>dist/</code> folder.</li>
+  <li><code>enableCommandUris</code> and <code>enableForms</code> are disabled.</li>
+  <li>All cell values render via <code>textContent</code> — never <code>innerHTML</code>. Crafted
+      cells containing markup display as plain text.</li>
+  <li>Hyperlinks are rendered as plain text (no <code>&lt;a href&gt;</code>) to defeat
+      <code>javascript:</code>, <code>vbscript:</code>, and <code>file://</code> exfiltration.</li>
+  <li>Formulas are not evaluated. Only cached values or formula text are read. CSV cells
+      beginning with <code>=</code>/<code>@</code>/<code>+</code> are shown verbatim; the
+      read-only renderer cannot execute them.</li>
+  <li>External images, drawings, OLE objects, charts, conditional formatting, and VBA macros
+      are ignored by the parser.</li>
+  <li>The runtime makes <strong>no network calls</strong> and emits <strong>no telemetry</strong>.</li>
+  <li><code>untrustedWorkspaces.supported = true</code>; the extension is safe in Restricted
+      Mode because it never executes file content.</li>
+</ul>
+<p>
+  Threat-model honesty: the file-size cap is the primary defence against denial-of-service.
+  This extension does <strong>not</strong> claim per-shared-string or per-decompression-byte
+  limits beyond that cap.
+</p>
+
+<h2>What this extension does not do</h2>
+<ul>
+  <li>Editing of any kind</li>
+  <li>Formula recalculation</li>
+  <li>Charts, images, pivot tables, conditional formatting</li>
+  <li>Macros / VBA</li>
+  <li>Export</li>
+</ul>
+
+<h2>Build and verify</h2>
+<pre>npm install
+npm run verify   <span style="color:#888"># lint + build + audit + tests</span>
+code --extensionDevelopmentPath=$PWD</pre>
+
+<h2>Origin and clean-room note</h2>
+<p>
+  Built independently against the public VS Code Custom Editor API and the public ExcelJS API.
+  No code, CSS, DOM structure, README text, icons, screenshots, or test data was copied or
+  adapted from any other spreadsheet viewer extension. Conceptual similarity in features
+  (preview tabular files with sort and filter) is unavoidable, but implementation, UI,
+  documentation, and assets are original.
+</p>
+
+<h2>License</h2>
+<p>MIT — see <code>LICENSE</code>.</p>
+
+</body>
+</html>

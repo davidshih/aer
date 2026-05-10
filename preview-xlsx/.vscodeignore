@@ -1,0 +1,13 @@
+.vscode/**
+src/**
+test/**
+out/**
+node_modules/**
+!node_modules/exceljs/**
+!dist/**
+.gitignore
+.eslintrc.json
+esbuild.js
+tsconfig.json
+**/*.map
+**/*.ts
