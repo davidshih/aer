@@ -29,21 +29,19 @@ export async function parseXlsx(filePath: string, opts: ParseOptions): Promise<W
   }
 
   const wb = new ExcelJS.Workbook();
-  // Reduce parse surface: skip parts we never render. This does not magically
-  // bound memory (ExcelJS still loads the workbook), but it shrinks the
-  // attack surface from external resources we do not consume.
+  // Reduce parse surface for things we never render. These names match the
+  // worksheet child nodes ExcelJS actually inspects against ignoreNodes;
+  // unknown names would silently do nothing. This does not bound memory —
+  // the file-size cap above is the real backstop.
   await wb.xlsx.readFile(filePath, {
     ignoreNodes: [
-      'styles',
-      'themes',
       'hyperlinks',
-      'media',
-      'drawings',
-      'comments',
-      'tables',
-      'pivotTables',
+      'picture',
+      'drawing',
+      'tableParts',
       'conditionalFormatting',
-      'dataValidations'
+      'dataValidations',
+      'extLst'
     ]
   } as unknown as Parameters<typeof wb.xlsx.readFile>[1]);
 
