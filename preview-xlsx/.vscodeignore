@@ -11,3 +11,5 @@ esbuild.js
 tsconfig.json
 **/*.map
 **/*.ts
+assets/icon.svg
+scripts/**

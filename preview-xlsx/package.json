@@ -13,6 +13,7 @@
     "Other"
   ],
   "main": "./dist/extension.js",
+  "icon": "assets/icon.png",
   "activationEvents": [
     "onCustomEditor:previewXlsx.viewer"
   ],
@@ -22,9 +23,15 @@
         "viewType": "previewXlsx.viewer",
         "displayName": "Spreadsheet Preview",
         "selector": [
-          { "filenamePattern": "*.xlsx" },
-          { "filenamePattern": "*.csv" },
-          { "filenamePattern": "*.tsv" }
+          {
+            "filenamePattern": "*.xlsx"
+          },
+          {
+            "filenamePattern": "*.csv"
+          },
+          {
+            "filenamePattern": "*.tsv"
+          }
         ],
         "priority": "option"
       }
@@ -50,7 +57,9 @@
     }
   },
   "capabilities": {
-    "untrustedWorkspaces": { "supported": true },
+    "untrustedWorkspaces": {
+      "supported": true
+    },
     "virtualWorkspaces": false
   },
   "scripts": {
@@ -60,15 +69,17 @@
     "watch": "node esbuild.js --watch",
     "audit": "npm audit --omit=dev --audit-level=moderate",
     "verify": "npm run lint && npm run build && npm run audit && npm run test",
-    "vscode:prepublish": "npm run build"
+    "vscode:prepublish": "npm run build",
+    "icon": "node scripts/build-icon.js"
   },
   "dependencies": {
     "exceljs": "4.4.0"
   },
   "devDependencies": {
+    "@resvg/resvg-js": "^2.6.2",
+    "@types/mocha": "10.0.7",
     "@types/node": "20.14.10",
     "@types/vscode": "1.85.0",
-    "@types/mocha": "10.0.7",
     "@typescript-eslint/eslint-plugin": "7.18.0",
     "@typescript-eslint/parser": "7.18.0",
     "@vscode/test-electron": "2.5.2",
