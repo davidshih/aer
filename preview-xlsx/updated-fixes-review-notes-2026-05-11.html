@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<title>Updated Fixes Review Notes - 2026-05-11</title>
+<style>
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    max-width: 920px;
+    margin: 32px auto;
+    padding: 0 20px;
+    line-height: 1.55;
+    color: #222;
+  }
+  h1, h2 {
+    border-bottom: 1px solid #ddd;
+    padding-bottom: 6px;
+  }
+  code {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    background: #f5f5f5;
+    padding: 1px 4px;
+    border-radius: 3px;
+  }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+  }
+  th, td {
+    border: 1px solid #ccc;
+    padding: 6px 8px;
+    text-align: left;
+    vertical-align: top;
+  }
+  th {
+    background: #f6f8fa;
+  }
+  .p1 { color: #9a5b00; font-weight: 700; }
+  .p2 { color: #555; font-weight: 700; }
+</style>
+</head>
+<body>
+<h1>Updated Fixes Review Notes</h1>
+<p>
+  Review date: 2026-05-11. Scope: fixes after the phase 2 review, including
+  <code>jsdom</code> compatibility, ExcelJS <code>ignoreNodes</code>, and the new
+  VS Code E2E smoke suite.
+</p>
+
+<h2>Verification</h2>
+<table>
+  <thead>
+    <tr><th>Command</th><th>Result</th><th>Notes</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>npm run lint</code></td><td>Pass</td><td>ESLint completed successfully.</td></tr>
+    <tr><td><code>npm run build</code></td><td>Pass</td><td>Build completed. Extension bundle remains about 2.1 MB.</td></tr>
+    <tr><td><code>npm run test</code></td><td>Pass</td><td>29 passing. The previous <code>jsdom</code> ESM/CJS failure is fixed.</td></tr>
+    <tr><td><code>./node_modules/.bin/tsc --noEmit</code></td><td>Pass</td><td>TypeScript check completed successfully.</td></tr>
+    <tr><td><code>npm run audit</code></td><td>Pass</td><td>Production dependency audit found 0 vulnerabilities.</td></tr>
+    <tr><td><code>npm run test:e2e</code></td><td>Pass</td><td>VS Code launched and reported 2 passing smoke tests.</td></tr>
+  </tbody>
+</table>
+
+<h2>Findings</h2>
+<table>
+  <thead>
+    <tr><th>Priority</th><th>Location</th><th>Issue</th><th>Recommendation</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="p1">P1</td>
+      <td><code>test/e2e/smoke.test.ts:26</code></td>
+      <td>
+        The E2E test computes <code>repoRoot</code> from <code>__dirname</code>.
+        After bundling to <code>out-e2e/smoke.test.js</code>, <code>__dirname</code>
+        points at <code>out-e2e</code>, so <code>path.resolve(__dirname, '..', '..')</code>
+        resolves to the parent workspace directory, not this extension root. The test
+        therefore opens a likely nonexistent <code>test/fixtures/multi-sheet.xlsx</code>.
+        Because it only asserts the active tab viewType, this can pass while the parser
+        shows an error in the webview.
+      </td>
+      <td>
+        Pass the real repo root from <code>runE2E.js</code> through an environment
+        variable or esbuild define, assert <code>fs.existsSync(fixture)</code> before
+        <code>vscode.openWith</code>, and ideally add a parse-success signal or use
+        extension-host-visible state so the test is not tab-only.
+      </td>
+    </tr>
+    <tr>
+      <td class="p1">P1</td>
+      <td><code>test/e2e/runE2E.js</code>, <code>package.json</code></td>
+      <td>
+        <code>npm run test:e2e</code> does not build the extension before launching
+        VS Code. It passes in a warmed workspace because <code>dist/</code> already
+        exists, but a fresh checkout can test stale or missing output.
+      </td>
+      <td>
+        Build the extension inside <code>runE2E.js</code> or change the script to
+        run <code>npm run build</code> first.
+      </td>
+    </tr>
+    <tr>
+      <td class="p2">P2</td>
+      <td><code>src/parsers/xlsx.ts</code>, <code>README.md</code></td>
+      <td>
+        The <code>ignoreNodes</code> list now uses realistic worksheet node names,
+        and the README correctly says file-size cap is the main DoS backstop. This
+        resolves the earlier fake-confidence issue.
+      </td>
+      <td>
+        Keep this wording. Do not describe the full ExcelJS loader as bounded parsing.
+      </td>
+    </tr>
+    <tr>
+      <td class="p2">P2</td>
+      <td><code>package.json</code></td>
+      <td>
+        The original security posture talked about exact dependency pins, but new
+        dev dependencies use caret ranges. The lockfile pins the current install, so
+        this is not blocking, but <code>npm install</code> can still move versions.
+      </td>
+      <td>
+        Prefer exact versions for dev tooling too, especially <code>jsdom</code>,
+        because this exact area just caused a runner break.
+      </td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>Summary</h2>
+<p>
+  The core phase 2 fixes are much healthier now: unit, security, CSP, rendering,
+  audit, build, and type checks pass. The remaining meaningful gap is E2E signal
+  quality: it currently proves activation and custom editor tab registration, but
+  not that the intended fixture was opened or parsed successfully.
+</p>
+</body>
+</html>

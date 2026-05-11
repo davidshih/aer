@@ -11,6 +11,12 @@ async function main() {
   fs.rmSync(outDir, { recursive: true, force: true });
   fs.mkdirSync(outDir, { recursive: true });
 
+  // Make sure the extension bundle exists; fresh checkouts must not test
+  // against stale or missing dist/.
+  const { spawnSync } = require('child_process');
+  const build = spawnSync('node', ['esbuild.js'], { cwd: repoRoot, stdio: 'inherit' });
+  if (build.status !== 0) throw new Error('extension build failed');
+
   await esbuild.build({
     entryPoints: [
       path.join(__dirname, 'index.ts'),
@@ -22,6 +28,9 @@ async function main() {
     target: 'node18',
     format: 'cjs',
     sourcemap: true,
+    define: {
+      'process.env.PREVIEW_XLSX_REPO_ROOT': JSON.stringify(repoRoot)
+    },
     external: ['vscode', 'mocha']
   });
 
@@ -35,7 +44,8 @@ async function main() {
       '--disable-extensions',
       '--disable-telemetry',
       `--user-data-dir=${userDataDir}`
-    ]
+    ],
+    extensionTestsEnv: { PREVIEW_XLSX_REPO_ROOT: repoRoot }
   });
 }
 

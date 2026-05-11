@@ -1,8 +1,10 @@
 import * as assert from 'assert';
 import * as path from 'path';
+import * as fs from 'fs';
 import * as vscode from 'vscode';
 
 const VIEW_TYPE = 'previewXlsx.viewer';
+const REPO_ROOT = process.env.PREVIEW_XLSX_REPO_ROOT;
 
 async function waitFor<T>(probe: () => T | undefined, timeoutMs = 10_000, stepMs = 100): Promise<T> {
   const start = Date.now();
@@ -23,18 +25,20 @@ describe('E2E · smoke', () => {
   });
 
   it('opens an .xlsx via the custom editor', async () => {
-    const repoRoot = path.resolve(__dirname, '..', '..');
-    const fixture = vscode.Uri.file(
-      path.join(repoRoot, 'test', 'fixtures', 'multi-sheet.xlsx')
-    );
+    assert.ok(REPO_ROOT, 'PREVIEW_XLSX_REPO_ROOT env not set by driver');
+    const fixturePath = path.join(REPO_ROOT, 'test', 'fixtures', 'multi-sheet.xlsx');
+    assert.ok(fs.existsSync(fixturePath), `fixture missing: ${fixturePath}`);
+    const fixture = vscode.Uri.file(fixturePath);
     await vscode.commands.executeCommand('vscode.openWith', fixture, VIEW_TYPE);
 
     const tab = await waitFor(() => {
       const t = vscode.window.tabGroups.activeTabGroup.activeTab;
-      const input = t?.input as { viewType?: string } | undefined;
-      return input && input.viewType === VIEW_TYPE ? t : undefined;
+      const input = t?.input as { viewType?: string; uri?: vscode.Uri } | undefined;
+      if (!input || input.viewType !== VIEW_TYPE) return undefined;
+      if (input.uri?.fsPath !== fixturePath) return undefined;
+      return t;
     });
-    assert.ok(tab, 'custom editor tab did not open');
+    assert.ok(tab, 'custom editor tab did not open for the expected fixture');
 
     await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
   });
