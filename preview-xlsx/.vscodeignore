@@ -1,9 +1,12 @@
 .vscode/**
+.vscode-test/**
+.vscode-test-user/**
 src/**
 test/**
 out/**
+out-test/**
+out-e2e/**
 node_modules/**
-!node_modules/exceljs/**
 !dist/**
 .gitignore
 .eslintrc.json
@@ -13,3 +16,6 @@ tsconfig.json
 **/*.ts
 assets/icon.svg
 scripts/**
+*-review-notes-*.html
+phase*-review-notes-*.html
+*.vsix
