@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AER Review Report Changes - 2026-06-10</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #172033;
+      --muted: #5f6b7a;
+      --line: #d8dde6;
+      --panel: #f7f9fc;
+      --accent: #0b5cab;
+      --good: #0b6b3a;
+      --warn: #9a6700;
+      --bad: #b42318;
+    }
+
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+      color: var(--ink);
+      background: #ffffff;
+      line-height: 1.5;
+    }
+
+    main {
+      max-width: 1040px;
+      margin: 0 auto;
+      padding: 32px 24px 48px;
+    }
+
+    header {
+      border-bottom: 2px solid var(--line);
+      margin-bottom: 24px;
+      padding-bottom: 18px;
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: 30px;
+      letter-spacing: 0;
+    }
+
+    h2 {
+      margin: 30px 0 10px;
+      font-size: 21px;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 6px;
+    }
+
+    h3 {
+      margin: 20px 0 8px;
+      font-size: 17px;
+    }
+
+    p {
+      margin: 8px 0;
+    }
+
+    code {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      font-size: 0.95em;
+      background: #eef3f8;
+      border: 1px solid #dce5f1;
+      border-radius: 4px;
+      padding: 1px 4px;
+    }
+
+    ul {
+      margin: 8px 0 12px 22px;
+      padding: 0;
+    }
+
+    li {
+      margin: 5px 0;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 12px 0 18px;
+      table-layout: fixed;
+    }
+
+    th,
+    td {
+      border: 1px solid var(--line);
+      padding: 9px 10px;
+      text-align: left;
+      vertical-align: top;
+      word-break: break-word;
+    }
+
+    th {
+      background: #eef3f8;
+      font-weight: 700;
+    }
+
+    .meta {
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .summary {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px 16px;
+      margin: 16px 0 22px;
+    }
+
+    .badge {
+      display: inline-block;
+      border-radius: 999px;
+      padding: 2px 9px;
+      margin: 0 4px 4px 0;
+      font-size: 12px;
+      font-weight: 700;
+      border: 1px solid transparent;
+    }
+
+    .badge.good {
+      color: var(--good);
+      background: #e8f5ee;
+      border-color: #c6e5d4;
+    }
+
+    .badge.warn {
+      color: var(--warn);
+      background: #fff6df;
+      border-color: #f2dfaa;
+    }
+
+    .badge.bad {
+      color: var(--bad);
+      background: #fff0ed;
+      border-color: #f3c6bd;
+    }
+
+    .callout {
+      border-left: 4px solid var(--accent);
+      background: #f4f8fd;
+      padding: 10px 12px;
+      margin: 14px 0;
+    }
+
+    .small {
+      color: var(--muted);
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>AER Review Report Changes</h1>
+      <p class="meta">Date: 2026-06-10 | Notebook: <code>REVIEW-REPORT/aer_report_0401.ipynb</code></p>
+      <p class="meta">Branches: <code>codex/fix-report-email-subfolders</code>, <code>codex/fix-report-selector-root-grey</code></p>
+    </header>
+
+    <section class="summary">
+      <h2>Executive Summary</h2>
+      <p>
+        Today's updates improve the standalone report notebook in two areas: the app selector in Cell 2 and
+        the reminder-email data preparation in Cell 7.
+      </p>
+      <p>
+        Operators can now select root-level folders as apps, select only grey child folders under a parent,
+        and keep existing red-folder selections unchanged. Reminder emails also keep pending rows when
+        folder URLs are missing.
+      </p>
+      <p>
+        <span class="badge good">Root folder selection</span>
+        <span class="badge good">Select Grey</span>
+        <span class="badge good">Missing folder URL fix</span>
+        <span class="badge warn">Pending emails only</span>
+      </p>
+    </section>
+
+    <section>
+      <h2>Cell 2 App Selector Changes</h2>
+
+      <h3>Root-level folder selection</h3>
+      <p>
+        Each folder listed directly under <code>BASE_PATH</code> now has a <strong>Root</strong> checkbox next to
+        the expand control. Selecting this checkbox adds the root folder itself to <code>TARGET_APPS</code>.
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>Selection</th>
+            <th><code>TARGET_APPS</code> tuple</th>
+            <th>Example</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Root folder</td>
+            <td><code>("", folder_name, BASE_PATH/folder_name)</code></td>
+            <td><code>("", "Q2", "2026 Entitlement Review/Q2")</code></td>
+          </tr>
+          <tr>
+            <td>Child folder</td>
+            <td><code>(parent_name, app_name, BASE_PATH/parent_name/app_name)</code></td>
+            <td><code>("Q2", "Application A", "2026 Entitlement Review/Q2/Application A")</code></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>Select Grey behavior</h3>
+      <p>
+        Expanded parent folders now show <strong>Select All</strong> and <strong>Select Grey</strong> controls.
+        Grey folders are folders with a child count of 5 or more. Red folders are folders with a child count
+        below 5.
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>Control</th>
+            <th>Behavior</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>Select All</strong></td>
+            <td>Selects or clears every child folder under that parent.</td>
+          </tr>
+          <tr>
+            <td><strong>Select Grey</strong></td>
+            <td>Selects or clears only grey child folders. Red child-folder selections stay unchanged.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="callout">
+        <strong>Operator note:</strong> If a red folder was manually selected before using <strong>Select Grey</strong>,
+        it remains selected. If a red folder was not selected, it remains unselected.
+      </div>
+    </section>
+
+    <section>
+      <h2>Root App Display and Manual Notes</h2>
+      <p>
+        Root-level selections use an empty category value. To avoid labels such as <code> &gt; Q2</code>, the
+        notebook now formats app keys with a shared helper:
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>Input</th>
+            <th>Displayed key</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>category=""</code>, <code>app_name="Q2"</code></td>
+            <td><code>Q2</code></td>
+          </tr>
+          <tr>
+            <td><code>category="Q2"</code>, <code>app_name="Application A"</code></td>
+            <td><code>Q2 &gt; Application A</code></td>
+          </tr>
+        </tbody>
+      </table>
+      <p>
+        The same formatting is used by dashboard grouping and Stage 7 reminder-email preparation, so manual
+        note lookups and email app classification stay consistent.
+      </p>
+    </section>
+
+    <section>
+      <h2>Cell 7 Email Data Fix</h2>
+      <p>
+        Stage 7 continues to build reminder emails from pending rows only. The data preparation now protects
+        pending rows from being dropped when <code>folder_url</code> is missing, blank, or null.
+      </p>
+      <ul>
+        <li>Missing <code>folder_url</code> values are normalized to <code>#</code>.</li>
+        <li>The grouping operation uses <code>dropna=False</code>.</li>
+        <li>Completed rows remain excluded from reminder emails.</li>
+        <li>Existing skip rules remain unchanged: <code>Force Completed</code>, <code>N/A</code>, <code>Mark Done</code>, <code>Waived</code>, and <code>Escalated</code>.</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>Validation</h2>
+      <p>Relevant tests were added for the changed behavior.</p>
+      <table>
+        <thead>
+          <tr>
+            <th>Validation</th>
+            <th>Coverage</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Notebook unit tests</td>
+            <td><code>python3 -m unittest discover -s REVIEW-REPORT/tests</code></td>
+          </tr>
+          <tr>
+            <td>Notebook compile check</td>
+            <td>All code cells compile from the notebook JSON source.</td>
+          </tr>
+          <tr>
+            <td>Selector regression tests</td>
+            <td>Grey/red classification, root app tuple generation, app-key formatting, and Select Grey red-preservation.</td>
+          </tr>
+          <tr>
+            <td>Email regression tests</td>
+            <td>Pending rows with missing folder URLs are retained; completed rows and skip-rule rows are excluded.</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="small">
+        Latest verified count after today's selector update: 13 notebook tests passing.
+      </p>
+    </section>
+  </main>
+</body>
+</html>
