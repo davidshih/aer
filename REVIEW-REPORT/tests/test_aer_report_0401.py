@@ -46,6 +46,23 @@ class AerReport0401NotebookTests(unittest.TestCase):
         self.assertEqual(helpers["_selector_count_color"](4), "#c62828")
         self.assertEqual(helpers["_selector_count_color"](5), "#888")
 
+    def test_cell2_select_grey_leaves_red_selection_unchanged(self):
+        helpers = self._load_cell2_selector_helpers()
+        red_checkbox = self._FakeCheckbox(True)
+        grey_checkbox = self._FakeCheckbox(False)
+        entries = [
+            {"checkbox": red_checkbox, "is_grey": False},
+            {"checkbox": grey_checkbox, "is_grey": True},
+        ]
+
+        helpers["_selector_apply_grey_selection"](entries, True)
+        self.assertTrue(red_checkbox.value)
+        self.assertTrue(grey_checkbox.value)
+
+        helpers["_selector_apply_grey_selection"](entries, False)
+        self.assertTrue(red_checkbox.value)
+        self.assertFalse(grey_checkbox.value)
+
     def test_cell2_selector_helpers_create_root_app_data(self):
         helpers = self._load_cell2_selector_helpers()
         self.assertEqual(
@@ -200,6 +217,10 @@ class AerReport0401NotebookTests(unittest.TestCase):
         row = self._pending_row(category, app_name, reviewer, folder_url)
         row["is_missing"] = False
         return row
+
+    class _FakeCheckbox:
+        def __init__(self, value):
+            self.value = value
 
 
 if __name__ == "__main__":
