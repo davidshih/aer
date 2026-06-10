@@ -39,6 +39,26 @@ class AerReport0401NotebookTests(unittest.TestCase):
         self.assertIn("def _graph_paginated_values", source)
         self.assertIn("@odata.nextLink", source)
 
+    def test_cell2_selector_helpers_classify_red_and_grey_folders(self):
+        helpers = self._load_cell2_selector_helpers()
+        self.assertFalse(helpers["_selector_is_grey_folder"](4))
+        self.assertTrue(helpers["_selector_is_grey_folder"](5))
+        self.assertEqual(helpers["_selector_count_color"](4), "#c62828")
+        self.assertEqual(helpers["_selector_count_color"](5), "#888")
+
+    def test_cell2_selector_helpers_create_root_app_data(self):
+        helpers = self._load_cell2_selector_helpers()
+        self.assertEqual(
+            helpers["_selector_root_app_data"]("Q2"),
+            ("", "Q2", "2026 Entitlement Review/Q2"),
+        )
+
+    def test_app_key_formatter_omits_root_prefix(self):
+        format_app_key = self._load_app_key_formatter()
+        self.assertEqual(format_app_key("", "root-app"), "root-app")
+        self.assertEqual(format_app_key("Q2", "child-app"), "Q2 > child-app")
+        self.assertNotIn(" > root-app", format_app_key("", "root-app"))
+
     def test_stage7_mailto_anchor_is_preserved(self):
         render = self._load_stage7_text_renderer()
         rendered = render('Contact us: <a href="mailto:test@example.com">Email Team</a>')
@@ -131,6 +151,26 @@ class AerReport0401NotebookTests(unittest.TestCase):
         exec(chunk, namespace)
         return namespace["_stage7_text_to_html"]
 
+    def _load_cell2_selector_helpers(self):
+        source = self.cell_source(2)
+        lines = source.splitlines()
+        start = next(i for i, line in enumerate(lines) if line.startswith("def _selector_join_path"))
+        end = next(i for i, line in enumerate(lines[start:], start) if line.startswith("def create_app_selector"))
+        chunk = "\n".join(lines[start:end])
+        namespace = {"BASE_PATH": "2026 Entitlement Review"}
+        exec(chunk, namespace)
+        return namespace
+
+    def _load_app_key_formatter(self):
+        source = self.cell_source(3)
+        lines = source.splitlines()
+        start = next(i for i, line in enumerate(lines) if line.startswith("def _format_app_key"))
+        end = next(i for i, line in enumerate(lines[start:], start) if line.startswith("# =========================================="))
+        chunk = "\n".join(lines[start:end])
+        namespace = {}
+        exec(chunk, namespace)
+        return namespace["_format_app_key"]
+
     def _load_stage7_email_preparer(self):
         source = self.cell_source(4)
         lines = source.splitlines()
@@ -141,6 +181,7 @@ class AerReport0401NotebookTests(unittest.TestCase):
             "pd": pd,
             "fmt_date_long": lambda value: f"sent:{value}",
             "calc_due_date_long": lambda value: f"due:{value}",
+            "_format_app_key": self._load_app_key_formatter(),
         }
         exec(chunk, namespace)
         return namespace["_stage7_prepare_email_rows"]
