@@ -525,9 +525,87 @@ FS_CLIENT_SECRET=your_client_secret</code></pre>
         <li><strong>Cell 1:</strong> Loads <code>.env</code>, reads Falcon settings, and prepares helper functions.</li>
         <li><strong>Cell 2:</strong> Gets alerts, security check details, affected resources, ServiceNow mappings, and quality checks.</li>
         <li><strong>Cell 3:</strong> Shows the alert UI with optional ServiceNow ticket context.</li>
-        <li><strong>Cell 4:</strong> Lists alerts missing open tickets and opens selected ServiceNow draft forms.</li>
+        <li><strong>Cell 4:</strong> Lists alerts missing open tickets and opens selected ServiceNow draft forms with plain text description and HTML work notes.</li>
         <li><strong>Cell 5:</strong> Exports XLSX and CSV files.</li>
       </ul>
+    </section>
+
+    <section class="section panel">
+      <h2>Cell 4: ServiceNow Draft Behavior</h2>
+      <p>Cell 4 is a helper for manual review. It opens draft incident forms and pre-fills fields, but it never saves, updates, or submits an incident.</p>
+      <div class="grid-3" style="margin-top: 16px;">
+        <div class="mini-card green">
+          <strong>Default people fields</strong>
+          Caller is <code>David Shih</code>, assignment group is <code>SN-informationSecurity</code>, and assigned to is <code>David Shih</code>.
+        </div>
+        <div class="mini-card blue">
+          <strong>Description</strong>
+          The <code>description</code> field gets easy-to-read plain text only, so ServiceNow does not show raw HTML there.
+        </div>
+        <div class="mini-card purple">
+          <strong>Work notes</strong>
+          The <code>work_notes</code> field gets <code>[code]...HTML...[/code]</code>, because that is where ServiceNow renders the HTML correctly.
+        </div>
+      </div>
+
+      <div class="flow" style="margin-top: 18px;" aria-label="ServiceNow draft tab workflow">
+        <div class="step">
+          <div class="num">1</div>
+          <h3>Pick alerts</h3>
+          <p>The checkbox list only shows alerts with no open ServiceNow ticket.</p>
+        </div>
+        <div class="step">
+          <div class="num">2</div>
+          <h3>Skip noise</h3>
+          <p>Alerts whose security check contains <code>Entra ID Federated</code> are hidden from the draft list.</p>
+        </div>
+        <div class="step">
+          <div class="num">3</div>
+          <h3>Open tabs</h3>
+          <p>One Selenium browser session opens one ServiceNow draft tab per selected alert.</p>
+        </div>
+        <div class="step">
+          <div class="num">4</div>
+          <h3>Retry first</h3>
+          <p>The first selected alert is opened again as the final tab, because the first form can sometimes miss population.</p>
+        </div>
+      </div>
+
+      <table style="margin-top: 18px;">
+        <thead>
+          <tr>
+            <th>ServiceNow field</th>
+            <th>What Cell 4 fills</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>short_description</code></td>
+            <td><code>Adaptive Shield &lt;Alert Type&gt;: [&lt;integration_alias&gt;] &lt;security_check_name&gt;</code></td>
+          </tr>
+          <tr>
+            <td><code>description</code></td>
+            <td>Plain text sections: summary, links and IDs, check details, remediation, affected entities, and timeline history.</td>
+          </tr>
+          <tr>
+            <td><code>work_notes</code></td>
+            <td>HTML wrapped in <code>[code]</code> and <code>[/code]</code>. URLs inside the HTML are turned into clickable links.</td>
+          </tr>
+          <tr>
+            <td><code>impact</code>, <code>urgency</code>, <code>category</code>, <code>subcategory</code></td>
+            <td>CSV mapping values first, then environment defaults.</td>
+          </tr>
+          <tr>
+            <td><code>caller_id</code>, <code>assignment_group</code>, <code>assigned_to</code></td>
+            <td>Set through ServiceNow reference-field friendly display values.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <pre><code>SNOW_DRAFT_CALLER=David Shih
+SNOW_DRAFT_ASSIGNMENT_GROUP=SN-informationSecurity
+SNOW_DRAFT_ASSIGNED_TO=David Shih
+SNOW_DRAFT_TAB_DELAY_SECONDS=1.5</code></pre>
     </section>
 
     <section class="section panel">
