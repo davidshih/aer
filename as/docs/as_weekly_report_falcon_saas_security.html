@@ -1,0 +1,624 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Falcon SaaS Security Weekly Report Guide</title>
+  <style>
+    :root {
+      --ink: #172033;
+      --muted: #5b6475;
+      --paper: #fffdf7;
+      --panel: #ffffff;
+      --line: #d9e0ea;
+      --blue: #2563eb;
+      --blue-soft: #dbeafe;
+      --green: #0f9f6e;
+      --green-soft: #dff8ec;
+      --orange: #f97316;
+      --orange-soft: #ffedd5;
+      --pink: #db2777;
+      --pink-soft: #fce7f3;
+      --purple: #7c3aed;
+      --purple-soft: #ede9fe;
+      --yellow: #ca8a04;
+      --yellow-soft: #fef3c7;
+      --red: #dc2626;
+      --red-soft: #fee2e2;
+      --code: #101827;
+      --code-text: #f8fafc;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(37, 99, 235, 0.16), transparent 34rem),
+        radial-gradient(circle at top right, rgba(249, 115, 22, 0.18), transparent 32rem),
+        linear-gradient(180deg, #f7fbff 0%, var(--paper) 48%, #f8fafc 100%);
+      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.55;
+    }
+
+    main {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 28px 18px 64px;
+    }
+
+    header {
+      display: grid;
+      grid-template-columns: minmax(0, 1.25fr) minmax(280px, 0.75fr);
+      gap: 22px;
+      align-items: stretch;
+      margin-bottom: 22px;
+    }
+
+    h1, h2, h3, p { margin-top: 0; }
+
+    h1 {
+      margin-bottom: 12px;
+      font-size: clamp(32px, 5vw, 56px);
+      line-height: 1.02;
+      letter-spacing: 0;
+    }
+
+    h2 {
+      margin-bottom: 14px;
+      font-size: 25px;
+      line-height: 1.2;
+    }
+
+    h3 {
+      margin-bottom: 8px;
+      font-size: 18px;
+    }
+
+    code {
+      padding: 2px 6px;
+      border-radius: 6px;
+      background: #eef2ff;
+      color: #1e1b4b;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.92em;
+    }
+
+    pre {
+      overflow-x: auto;
+      margin: 12px 0 0;
+      padding: 15px 16px;
+      border-radius: 10px;
+      background: var(--code);
+      color: var(--code-text);
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.08);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    pre code { padding: 0; background: transparent; color: inherit; }
+
+    .hero, .panel, .mini-card, .step, .endpoint, .trouble-card {
+      border: 1px solid rgba(23, 32, 51, 0.11);
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.92);
+      box-shadow: 0 18px 50px rgba(15, 23, 42, 0.08);
+    }
+
+    .hero {
+      padding: 28px;
+      background: linear-gradient(135deg, rgba(255,255,255,0.96), rgba(219,234,254,0.88));
+    }
+
+    .hero p {
+      margin-bottom: 0;
+      color: var(--muted);
+      font-size: 18px;
+    }
+
+    .hero-aside {
+      padding: 22px;
+      background: linear-gradient(145deg, #111827, #1e3a8a 58%, #0f766e);
+      color: white;
+      border-radius: 14px;
+      box-shadow: 0 20px 60px rgba(15, 23, 42, 0.22);
+    }
+
+    .hero-aside .label {
+      color: #bfdbfe;
+      font-size: 13px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    .big-number {
+      margin: 12px 0 6px;
+      font-size: 50px;
+      font-weight: 800;
+      line-height: 1;
+    }
+
+    .tag-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 18px;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      min-height: 30px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: white;
+      color: var(--ink);
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .section {
+      margin-top: 22px;
+    }
+
+    .panel { padding: 24px; }
+
+    .kid-note {
+      display: grid;
+      grid-template-columns: 58px minmax(0, 1fr);
+      gap: 14px;
+      align-items: center;
+      padding: 16px;
+      border-radius: 14px;
+      background: var(--yellow-soft);
+      border: 1px solid #facc15;
+    }
+
+    .icon-bubble {
+      display: grid;
+      place-items: center;
+      width: 58px;
+      height: 58px;
+      border-radius: 18px;
+      color: white;
+      font-size: 28px;
+      font-weight: 800;
+      background: var(--orange);
+    }
+
+    .grid-2, .grid-3 {
+      display: grid;
+      gap: 16px;
+    }
+
+    .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+    .mini-card {
+      padding: 18px;
+      box-shadow: none;
+    }
+
+    .mini-card.blue { background: var(--blue-soft); border-color: #93c5fd; }
+    .mini-card.green { background: var(--green-soft); border-color: #86efac; }
+    .mini-card.orange { background: var(--orange-soft); border-color: #fdba74; }
+    .mini-card.pink { background: var(--pink-soft); border-color: #f9a8d4; }
+    .mini-card.purple { background: var(--purple-soft); border-color: #c4b5fd; }
+    .mini-card.red { background: var(--red-soft); border-color: #fca5a5; }
+
+    .mini-card strong {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 17px;
+    }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(145px, 1fr));
+      gap: 14px;
+      align-items: stretch;
+    }
+
+    .step {
+      position: relative;
+      padding: 18px 15px;
+      min-height: 160px;
+      box-shadow: none;
+      background: white;
+    }
+
+    .step:not(:last-child)::after {
+      content: "→";
+      position: absolute;
+      right: -17px;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 20px;
+      height: 20px;
+      border-radius: 999px;
+      background: var(--ink);
+      color: white;
+      font-size: 14px;
+      line-height: 20px;
+      text-align: center;
+      z-index: 2;
+    }
+
+    .step .num {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 34px;
+      height: 34px;
+      margin-bottom: 10px;
+      border-radius: 11px;
+      color: white;
+      font-weight: 800;
+    }
+
+    .step:nth-child(1) .num { background: var(--blue); }
+    .step:nth-child(2) .num { background: var(--green); }
+    .step:nth-child(3) .num { background: var(--orange); }
+    .step:nth-child(4) .num { background: var(--purple); }
+    .step:nth-child(5) .num { background: var(--pink); }
+
+    .step p { margin-bottom: 0; color: var(--muted); font-size: 14px; }
+
+    .endpoint-map {
+      display: grid;
+      gap: 12px;
+    }
+
+    .endpoint {
+      display: grid;
+      grid-template-columns: 150px minmax(0, 1fr);
+      gap: 12px;
+      align-items: center;
+      padding: 14px;
+      box-shadow: none;
+    }
+
+    .method {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 34px;
+      border-radius: 9px;
+      color: white;
+      font-weight: 800;
+    }
+
+    .method.post { background: var(--purple); }
+    .method.get { background: var(--green); }
+
+    .checklist {
+      display: grid;
+      gap: 10px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .checklist li {
+      padding: 12px 14px;
+      border-radius: 10px;
+      background: #f8fafc;
+      border: 1px solid var(--line);
+    }
+
+    .checklist li::before {
+      content: "✓";
+      display: inline-grid;
+      place-items: center;
+      width: 24px;
+      height: 24px;
+      margin-right: 9px;
+      border-radius: 8px;
+      background: var(--green);
+      color: white;
+      font-weight: 900;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 0;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: white;
+    }
+
+    th, td {
+      padding: 11px 12px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th { background: #e0f2fe; }
+    tr:last-child td { border-bottom: 0; }
+
+    .trouble-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .trouble-card {
+      padding: 16px;
+      box-shadow: none;
+    }
+
+    .trouble-card h3 {
+      display: inline-block;
+      padding: 5px 9px;
+      border-radius: 8px;
+      color: white;
+      background: var(--red);
+    }
+
+    .plain-list { margin: 0 0 0 20px; padding: 0; }
+
+    .footer-note {
+      margin-top: 20px;
+      padding: 16px;
+      border-radius: 14px;
+      background: #ecfeff;
+      border: 1px solid #67e8f9;
+    }
+
+    @media (max-width: 900px) {
+      header, .grid-2, .grid-3, .trouble-grid { grid-template-columns: 1fr; }
+      .flow { grid-template-columns: 1fr; }
+      .step:not(:last-child)::after {
+        content: "↓";
+        right: auto;
+        left: 50%;
+        top: auto;
+        bottom: -17px;
+        transform: translateX(-50%);
+      }
+      .endpoint { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <section class="hero">
+        <h1>Falcon Weekly Report Guide</h1>
+        <p>How the notebook gets SaaS Security alerts from CrowdStrike Falcon, turns them into report tables, and helps prepare ServiceNow draft incidents.</p>
+        <div class="tag-row">
+          <span class="tag">Falcon SaaS Security</span>
+          <span class="tag">Weekly report</span>
+          <span class="tag">ServiceNow draft helper</span>
+          <span class="tag">No auto-submit</span>
+        </div>
+      </section>
+      <aside class="hero-aside">
+        <div class="label">The one thing to remember</div>
+        <div class="big-number">3 keys</div>
+        <p>Set <code>FS_BASE_URL</code>, <code>FS_CLIENT_ID</code>, and <code>FS_CLIENT_SECRET</code>. The notebook does the rest.</p>
+      </aside>
+    </header>
+
+    <section class="section panel">
+      <div class="kid-note">
+        <div class="icon-bubble">?</div>
+        <div>
+          <h2>What is this doing?</h2>
+          <p>Think of Falcon as the source of truth, the notebook as the sorter, Excel as the homework sheet, and ServiceNow as the place where a human can open a ticket draft.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section panel">
+      <h2>Big Picture Flow</h2>
+      <div class="flow" aria-label="Falcon report workflow">
+        <div class="step">
+          <div class="num">1</div>
+          <h3>Login to Falcon API</h3>
+          <p>The notebook uses your API client ID and secret to get a temporary access token.</p>
+        </div>
+        <div class="step">
+          <div class="num">2</div>
+          <h3>Fetch alerts</h3>
+          <p>It asks Falcon for configuration drift and integration failure alerts.</p>
+        </div>
+        <div class="step">
+          <div class="num">3</div>
+          <h3>Add details</h3>
+          <p>It fetches security check details and affected resources for each alert.</p>
+        </div>
+        <div class="step">
+          <div class="num">4</div>
+          <h3>Build report</h3>
+          <p>It creates summary, entity, error, and ServiceNow mapping tables.</p>
+        </div>
+        <div class="step">
+          <div class="num">5</div>
+          <h3>Review drafts</h3>
+          <p>You can cherry-pick missing-ticket alerts and open prefilled ServiceNow drafts.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section grid-3">
+      <div class="mini-card blue">
+        <strong>Data source</strong>
+        Falcon SaaS Security API is now the primary source.
+      </div>
+      <div class="mini-card green">
+        <strong>Authentication</strong>
+        OAuth2 client credentials, not the old Adaptive Shield token.
+      </div>
+      <div class="mini-card orange">
+        <strong>Safety</strong>
+        ServiceNow draft cell pre-fills forms only. It does not submit tickets.
+      </div>
+    </section>
+
+    <section class="section panel">
+      <h2>Step 1: Put These in <code>.env</code></h2>
+      <p>For your US-2 tenant, this is the expected setup:</p>
+      <pre><code>API_SOURCE=falcon
+FS_BASE_URL=https://api.us-2.crowdstrike.com
+FS_CLIENT_ID=your_client_id
+FS_CLIENT_SECRET=your_client_secret</code></pre>
+      <div class="grid-2" style="margin-top: 16px;">
+        <div class="mini-card green">
+          <strong>Good base URL</strong>
+          <code>https://api.us-2.crowdstrike.com</code>
+        </div>
+        <div class="mini-card purple">
+          <strong>Also accepted</strong>
+          <code>https://api.us-2.crowdstrike.com/saas-security/</code><br>
+          The notebook cleans it up automatically.
+        </div>
+      </div>
+    </section>
+
+    <section class="section panel">
+      <h2>Step 2: API Client Permission</h2>
+      <p>The CrowdStrike API client needs read access for SaaS Security / Falcon Shield.</p>
+      <div class="mini-card yellow" style="background: var(--yellow-soft); border-color: #facc15;">
+        <strong>Ask for this permission</strong>
+        <code>SaaS Security (Falcon Shield): READ</code>
+      </div>
+      <p style="margin-top: 12px;">If the notebook gets <code>403 Forbidden</code>, the client probably exists but does not have this permission.</p>
+    </section>
+
+    <section class="section panel">
+      <h2>API Endpoints Used</h2>
+      <div class="endpoint-map">
+        <div class="endpoint">
+          <span class="method post">POST</span>
+          <code>/oauth2/token</code>
+        </div>
+        <div class="endpoint">
+          <span class="method get">GET</span>
+          <code>/saas-security/entities/alerts/v3</code>
+        </div>
+        <div class="endpoint">
+          <span class="method get">GET</span>
+          <code>/saas-security/entities/checks/v3</code>
+        </div>
+        <div class="endpoint">
+          <span class="method get">GET</span>
+          <code>/saas-security/entities/check-affected/v3</code>
+        </div>
+        <div class="endpoint">
+          <span class="method get">GET</span>
+          <code>/saas-security/entities/integrations/v3</code>
+        </div>
+      </div>
+      <p style="margin-top: 14px;">Dates are sent as <code>YYYY-MM-DD</code>, because Falcon SaaS Security expects that format.</p>
+    </section>
+
+    <section class="section panel">
+      <h2>What Each Notebook Cell Does</h2>
+      <ul class="checklist">
+        <li><strong>Cell 1:</strong> Loads <code>.env</code>, reads Falcon settings, and prepares helper functions.</li>
+        <li><strong>Cell 2:</strong> Gets alerts, security check details, affected resources, ServiceNow mappings, and quality checks.</li>
+        <li><strong>Cell 3:</strong> Shows the alert UI with optional ServiceNow ticket context.</li>
+        <li><strong>Cell 4:</strong> Lists alerts missing open tickets and opens selected ServiceNow draft forms.</li>
+        <li><strong>Cell 5:</strong> Exports XLSX and CSV files.</li>
+      </ul>
+    </section>
+
+    <section class="section panel">
+      <h2>ServiceNow Draft Assignment Map</h2>
+      <p>Use this if certain integrations should go to a specific team or person.</p>
+      <pre><code>SNOW_DRAFT_ASSIGNMENT_MAPPING_PATH=config/snow_draft_assignment_mapping.csv</code></pre>
+      <table>
+        <thead>
+          <tr>
+            <th>CSV column</th>
+            <th>Meaning</th>
+            <th>Example</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>match_field</code></td>
+            <td>Which report field to inspect.</td>
+            <td><code>integration_name</code></td>
+          </tr>
+          <tr>
+            <td><code>match_value</code></td>
+            <td>Text to find inside that field.</td>
+            <td><code>UiPath</code></td>
+          </tr>
+          <tr>
+            <td><code>assignment_group</code></td>
+            <td>ServiceNow group to assign.</td>
+            <td><code>RPA Security Team</code></td>
+          </tr>
+          <tr>
+            <td><code>assigned_to</code></td>
+            <td>Optional person to assign.</td>
+            <td><code>Jane Doe</code></td>
+          </tr>
+        </tbody>
+      </table>
+      <pre><code>match_field,match_value,assignment_group,assigned_to,category,subcategory,impact,urgency,notes
+integration_name,UiPath,RPA Security Team,Jane Doe,Security,Automation,2,2,Route UiPath alerts to RPA owner</code></pre>
+      <p>Supported match fields: <code>integration_name</code>, <code>integration_alias</code>, and <code>saas_name</code>. First matching row wins.</p>
+    </section>
+
+    <section class="section panel">
+      <h2>Troubleshooting Cheat Sheet</h2>
+      <div class="trouble-grid">
+        <div class="trouble-card">
+          <h3>401</h3>
+          <p><strong>Meaning:</strong> Falcon did not accept the client credentials.</p>
+          <ul class="plain-list">
+            <li>Check <code>FS_CLIENT_ID</code>.</li>
+            <li>Check <code>FS_CLIENT_SECRET</code>.</li>
+            <li>Check <code>FS_BASE_URL</code>.</li>
+          </ul>
+        </div>
+        <div class="trouble-card">
+          <h3>403</h3>
+          <p><strong>Meaning:</strong> The client exists, but it lacks permission.</p>
+          <ul class="plain-list">
+            <li>Ask for <code>SaaS Security (Falcon Shield): READ</code>.</li>
+          </ul>
+        </div>
+        <div class="trouble-card">
+          <h3>No alerts</h3>
+          <p><strong>Meaning:</strong> The notebook worked, but there may be no matching alerts.</p>
+          <ul class="plain-list">
+            <li>Increase <code>LOOKBACK_DAYS</code>.</li>
+            <li>Confirm alerts exist in Falcon.</li>
+            <li>Confirm you are using the correct Falcon cloud.</li>
+          </ul>
+        </div>
+        <div class="trouble-card">
+          <h3>Stale rows</h3>
+          <p><strong>Meaning:</strong> The local cache may be showing older API results.</p>
+          <ul class="plain-list">
+            <li>Disable cache for one run.</li>
+            <li>Or clear <code>.cache/as_weekly_report</code>.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="section panel">
+      <h2>Legacy Adaptive Shield Fallback</h2>
+      <p>Only use this if you must run against the old API.</p>
+      <pre><code>API_SOURCE=adaptive_shield
+AS_API_KEY=your_legacy_token
+AS_BASE_URL=https://api.adaptive-shield.com</code></pre>
+      <div class="footer-note">
+        New API clients should use Falcon SaaS Security. The old token path is kept only so older setups do not break immediately.
+      </div>
+    </section>
+  </main>
+</body>
+</html>
