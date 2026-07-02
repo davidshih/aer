@@ -547,12 +547,16 @@ FS_CLIENT_SECRET=your_client_secret</code></pre>
           The <code>work_notes</code> field gets <code>[code]...HTML...[/code]</code>, because that is where ServiceNow renders the HTML correctly.
         </div>
       </div>
+      <div class="mini-card yellow" style="background: var(--yellow-soft); border-color: #facc15; margin-top: 14px;">
+        <strong>Hidden memory</strong>
+        Use <code>Hide Selected</code> to remember Falcon Shield alerts/checks you do not want to see again. The notebook stores that memory in <code>.cache/as_weekly_report/snow_draft_hidden_alerts.json</code> by default.
+      </div>
 
       <div class="flow" style="margin-top: 18px;" aria-label="ServiceNow draft tab workflow">
         <div class="step">
           <div class="num">1</div>
           <h3>Pick alerts</h3>
-          <p>The checkbox list only shows alerts with no open ServiceNow ticket.</p>
+          <p>The checkbox list only shows alerts with no open ServiceNow ticket and no hidden-memory match.</p>
         </div>
         <div class="step">
           <div class="num">2</div>
@@ -605,7 +609,8 @@ FS_CLIENT_SECRET=your_client_secret</code></pre>
       <pre><code>SNOW_DRAFT_CALLER=David Shih
 SNOW_DRAFT_ASSIGNMENT_GROUP=SN-informationSecurity
 SNOW_DRAFT_ASSIGNED_TO=David Shih
-SNOW_DRAFT_TAB_DELAY_SECONDS=1.5</code></pre>
+SNOW_DRAFT_TAB_DELAY_SECONDS=1.5
+SNOW_DRAFT_HIDDEN_ALERTS_PATH=</code></pre>
     </section>
 
     <section class="section panel">
