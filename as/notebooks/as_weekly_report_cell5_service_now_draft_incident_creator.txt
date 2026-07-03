@@ -1,0 +1,1673 @@
+# Cell 5: ServiceNow Draft Incident Creator
+
+SNOW_DRAFT_DISPLAY_COLUMNS = [
+    "alert_id",
+    "alert_type",
+    "security_check_name",
+    "impact_level",
+    "account_name",
+    "integration_name",
+    "integration_alias",
+    "saas_name",
+    "affected_entities_count",
+]
+
+SNOW_DRAFT_MAPPING_COLUMNS = [
+    "match_field",
+    "match_value",
+    "assignment_group",
+    "assigned_to",
+    "category",
+    "subcategory",
+    "impact",
+    "urgency",
+    "notes",
+]
+
+SNOW_DRAFT_ALLOWED_MATCH_FIELDS = {"integration_name", "integration_alias", "saas_name"}
+SNOW_DRAFT_REFERENCE_FIELDS = {"caller_id", "assignment_group", "assigned_to"}
+SNOW_DRAFT_DEFAULT_STATE_LABEL = "In Progress"
+SNOW_DRAFT_EXCLUDED_SECURITY_CHECK_PATTERNS = ["entra id federated"]
+SNOW_DRAFT_RAW_TABLE_TITLE = "Raw candidate table"
+
+
+def _snow_draft_text(value: Any) -> str:
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    return str(value).strip()
+
+
+def _snow_draft_int(value: Any, default: int = 0) -> int:
+    text = _snow_draft_text(value)
+    if not text:
+        return default
+    try:
+        return int(float(text))
+    except Exception:
+        return default
+
+
+def _snow_draft_float(value: Any, default: float = 0.0) -> float:
+    text = _snow_draft_text(value)
+    if not text:
+        return default
+    try:
+        return float(text)
+    except Exception:
+        return default
+
+
+def _snow_draft_bool_false(value: Any) -> bool:
+    if value is False:
+        return True
+    text = _snow_draft_text(value).lower()
+    return text in {"false", "0", "no", "n"}
+
+
+def _snow_draft_is_excluded_security_check(value: Any) -> bool:
+    text = _snow_draft_text(value).lower()
+    return bool(text) and any(pattern in text for pattern in SNOW_DRAFT_EXCLUDED_SECURITY_CHECK_PATTERNS)
+
+
+def _snow_draft_excluded_security_check_mask(df: pd.DataFrame) -> pd.Series:
+    excluded = pd.Series([False] * len(df), index=df.index)
+    for column in ["security_check_name", "security_check", "security_check_id"]:
+        if column in df.columns:
+            excluded = excluded | df[column].map(_snow_draft_is_excluded_security_check)
+    return excluded
+
+
+def _snow_draft_empty_hidden_registry() -> dict[str, Any]:
+    return {"version": 1, "hidden_keys": {}}
+
+
+def _snow_draft_load_hidden_registry(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return _snow_draft_empty_hidden_registry()
+
+    try:
+        data = json.loads(path.read_text())
+    except Exception:
+        return _snow_draft_empty_hidden_registry()
+
+    raw_hidden = data.get("hidden_keys", {}) if isinstance(data, dict) else {}
+    hidden_keys = {}
+    if isinstance(raw_hidden, list):
+        hidden_keys = {_snow_draft_text(key): {} for key in raw_hidden if _snow_draft_text(key)}
+    elif isinstance(raw_hidden, dict):
+        hidden_keys = {
+            _snow_draft_text(key): value if isinstance(value, dict) else {}
+            for key, value in raw_hidden.items()
+            if _snow_draft_text(key)
+        }
+
+    return {"version": 1, "hidden_keys": hidden_keys}
+
+
+def _snow_draft_save_hidden_registry(path: Path, registry: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    normalized_registry = {
+        "version": 1,
+        "hidden_keys": registry.get("hidden_keys", {}) if isinstance(registry, dict) else {},
+    }
+    temp_path = path.with_name(f"{path.name}.tmp")
+    temp_path.write_text(json.dumps(normalized_registry, indent=2, sort_keys=True, ensure_ascii=False) + "\n")
+    temp_path.replace(path)
+
+
+def _snow_draft_key_part(value: Any) -> str:
+    text = _snow_draft_text(value).lower()
+    return re.sub(r"[^a-z0-9]+", "-", text).strip("-")
+
+
+def _snow_draft_hidden_key(row: dict[str, Any]) -> str:
+    group_key = _snow_draft_group_key(row)
+    if group_key:
+        return f"group:{group_key}"
+
+    for field in ["ticket_match_key", "check_key"]:
+        key_part = _snow_draft_key_part(row.get(field))
+        if key_part:
+            return f"{field}:{key_part}"
+
+    alert_part = _snow_draft_key_part(row.get("alert_id"))
+    if alert_part:
+        return f"alert:{alert_part}"
+
+    return f"row:{_snow_draft_key_part(row.get('draft_row_id'))}"
+
+def _snow_draft_hidden_entry(row: dict[str, Any]) -> dict[str, str]:
+    hidden_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    return {
+        "hidden_at_utc": hidden_at,
+        "alert_id": _snow_draft_text(row.get("alert_id")),
+        "alert_type": _snow_draft_alert_type_label(row.get("alert_type")),
+        "account_name": _snow_draft_text(row.get("account_name")),
+        "integration_alias": _snow_draft_text(row.get("integration_alias")),
+        "integration_name": _snow_draft_text(row.get("integration_name")),
+        "saas_name": _snow_draft_text(row.get("saas_name")),
+        "security_check_name": _snow_draft_text(row.get("security_check_name")),
+        "label": _snow_draft_option_label(row),
+    }
+
+
+def _snow_draft_candidates_with_hidden_state(
+    candidates_df: pd.DataFrame,
+    hidden_registry: dict[str, Any],
+) -> pd.DataFrame:
+    working_df = candidates_df.copy()
+    hidden_keys = set((hidden_registry.get("hidden_keys") or {}).keys())
+    if working_df.empty:
+        working_df["snow_draft_group_key"] = pd.Series(dtype=str)
+        working_df["snow_draft_hidden_key"] = pd.Series(dtype=str)
+        working_df["snow_draft_is_hidden"] = pd.Series(dtype=bool)
+        return working_df
+
+    working_df["snow_draft_group_key"] = [
+        _snow_draft_group_key(row) for row in working_df.to_dict("records")
+    ]
+    working_df["snow_draft_hidden_key"] = [
+        _snow_draft_hidden_key(row) for row in working_df.to_dict("records")
+    ]
+    working_df["snow_draft_is_hidden"] = working_df["snow_draft_hidden_key"].isin(hidden_keys)
+    return working_df
+
+def _snow_draft_config() -> dict[str, Any]:
+    default_mapping_path = ROOT_DIR / "config" / "snow_draft_assignment_mapping.csv"
+    mapping_path = _snow_draft_text(os.getenv("SNOW_DRAFT_ASSIGNMENT_MAPPING_PATH"))
+    return {
+        "enabled": True,
+        "max_rows": max(1, _snow_draft_int(os.getenv("SNOW_DRAFT_MAX_ROWS"), 10)),
+        "mapping_path": Path(mapping_path).expanduser() if mapping_path else default_mapping_path,
+        "hidden_alerts_path": Path(_snow_draft_text(os.getenv("SNOW_DRAFT_HIDDEN_ALERTS_PATH")) or (ROOT_DIR / ".cache" / "as_weekly_report" / "snow_draft_hidden_alerts.json")).expanduser(),
+        "caller_id": _snow_draft_text(os.getenv("SNOW_DRAFT_CALLER", "David Shih")),
+        "assignment_group": _snow_draft_text(os.getenv("SNOW_DRAFT_ASSIGNMENT_GROUP", "SN-informationSecurity")),
+        "assigned_to": _snow_draft_text(os.getenv("SNOW_DRAFT_ASSIGNED_TO", "David Shih")),
+        "category": _snow_draft_text(os.getenv("SNOW_DRAFT_CATEGORY", "Security")),
+        "subcategory": _snow_draft_text(os.getenv("SNOW_DRAFT_SUBCATEGORY")),
+        "impact": _snow_draft_text(os.getenv("SNOW_DRAFT_IMPACT_DEFAULT", "2")),
+        "urgency": _snow_draft_text(os.getenv("SNOW_DRAFT_URGENCY_DEFAULT", "2")),
+        "wait_seconds": max(5, _snow_draft_int(os.getenv("SNOW_DRAFT_FORM_TIMEOUT_SECONDS"), 60)),
+        "form_ready_seconds": max(3, _snow_draft_int(os.getenv("SNOW_DRAFT_FORM_READY_SECONDS"), 15)),
+        "tab_delay_seconds": max(0.0, _snow_draft_float(os.getenv("SNOW_DRAFT_TAB_DELAY_SECONDS", "1.5"), 1.5)),
+    }
+
+
+def _snow_draft_missing_ticket_candidates(summary_df: pd.DataFrame) -> pd.DataFrame:
+    if summary_df is None or summary_df.empty:
+        return pd.DataFrame(columns=SNOW_DRAFT_DISPLAY_COLUMNS)
+
+    candidates_df = summary_df.copy()
+    if not candidates_df.empty:
+        candidates_df = candidates_df[~_snow_draft_excluded_security_check_mask(candidates_df)].copy()
+
+    candidates_df = candidates_df.reset_index(drop=False).rename(columns={"index": "source_row_index"})
+    candidates_df["draft_row_id"] = candidates_df.index.astype(int)
+
+    for column in SNOW_DRAFT_DISPLAY_COLUMNS:
+        if column not in candidates_df.columns:
+            candidates_df[column] = ""
+
+    return candidates_df
+
+def _snow_draft_normalized_status(value: Any) -> str:
+    return re.sub(r"[\s_\-]+", " ", _snow_draft_text(value).lower()).strip()
+
+
+def _snow_draft_group_key(row: dict[str, Any]) -> str:
+    account_part = _snow_draft_key_part(row.get("account_id") or row.get("account_name"))
+    integration_part = _snow_draft_key_part(
+        row.get("integration_id")
+        or row.get("integration_alias")
+        or row.get("integration_name")
+        or row.get("saas_name")
+    )
+    check_part = _snow_draft_key_part(
+        row.get("security_check_id")
+        or row.get("security_check_name")
+        or row.get("security_check")
+    )
+    stable_parts = [part for part in [account_part, integration_part, check_part] if part]
+    if stable_parts:
+        return "|".join(stable_parts)
+    return _snow_draft_key_part(row.get("alert_id") or row.get("draft_row_id"))
+
+
+def _snow_draft_datetime(value: Any) -> Any:
+    text = _snow_draft_text(value)
+    if not text:
+        return pd.NaT
+    try:
+        return pd.to_datetime(text, utc=True, errors="coerce")
+    except Exception:
+        return pd.NaT
+
+
+def _snow_draft_is_valid_datetime(value: Any) -> bool:
+    try:
+        return not pd.isna(value)
+    except Exception:
+        return False
+
+
+def _snow_draft_latest_row(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    if not rows:
+        return {}
+
+    latest_row = rows[0]
+    latest_ts = _snow_draft_datetime(latest_row.get("change_datetime"))
+    for row in rows[1:]:
+        row_ts = _snow_draft_datetime(row.get("change_datetime"))
+        if not _snow_draft_is_valid_datetime(latest_ts):
+            if _snow_draft_is_valid_datetime(row_ts):
+                latest_row = row
+                latest_ts = row_ts
+            continue
+        if _snow_draft_is_valid_datetime(row_ts) and row_ts > latest_ts:
+            latest_row = row
+            latest_ts = row_ts
+    return latest_row
+
+
+def _snow_draft_first_nonempty(rows: list[dict[str, Any]], field: str) -> str:
+    for row in rows:
+        value = _snow_draft_text(row.get(field))
+        if value:
+            return value
+    return ""
+
+
+def _snow_draft_is_high_impact(row: dict[str, Any]) -> bool:
+    return _snow_draft_normalized_status(row.get("impact_level")) in {"high", "critical"}
+
+
+def _snow_draft_is_integration_failure(row: dict[str, Any]) -> bool:
+    return _snow_draft_normalized_status(row.get("alert_type")) == "integration failure"
+
+
+def _snow_draft_is_passed_configuration_drift(row: dict[str, Any]) -> bool:
+    return (
+        _snow_draft_normalized_status(row.get("alert_type")) == "configuration drift"
+        and _snow_draft_normalized_status(row.get("current_status")) == "passed"
+    )
+
+
+def _snow_draft_is_servicenow_mapped(row: dict[str, Any]) -> bool:
+    if _snow_draft_int(row.get("open_ticket_count_for_check"), 0) > 0:
+        return True
+    return any(
+        _snow_draft_text(row.get(field))
+        for field in ["ticket_number", "ticket_url", "ticket_match_key"]
+    )
+
+
+def _snow_draft_group_disabled_reason(row: dict[str, Any], rows: list[dict[str, Any]]) -> str:
+    if any(_snow_draft_is_servicenow_mapped(candidate) for candidate in rows):
+        ticket_number = _snow_draft_first_nonempty(rows, "ticket_number")
+        return f"Mapped to ServiceNow {ticket_number}".strip()
+    if _snow_draft_is_passed_configuration_drift(row):
+        return "Configuration drift is Passed"
+    return ""
+
+
+def _snow_draft_grouped_candidates_df(candidates_df: pd.DataFrame) -> pd.DataFrame:
+    if candidates_df is None or candidates_df.empty:
+        return pd.DataFrame()
+
+    grouped_rows = []
+    source_rows = candidates_df.to_dict("records")
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in source_rows:
+        group_key = _snow_draft_text(row.get("snow_draft_group_key")) or _snow_draft_group_key(row)
+        groups.setdefault(group_key, []).append(row)
+
+    for group_key, rows in groups.items():
+        representative = dict(_snow_draft_latest_row(rows))
+        latest_ts = _snow_draft_datetime(representative.get("change_datetime"))
+        sorted_group_rows = sorted(
+            rows,
+            key=lambda item: (
+                _snow_draft_is_valid_datetime(_snow_draft_datetime(item.get("change_datetime"))),
+                _snow_draft_datetime(item.get("change_datetime")) if _snow_draft_is_valid_datetime(_snow_draft_datetime(item.get("change_datetime"))) else pd.Timestamp.min.tz_localize("UTC"),
+            ),
+            reverse=True,
+        )
+        disabled_reason = _snow_draft_group_disabled_reason(representative, rows)
+        affected_values = [
+            _snow_draft_int(row.get("affected_entities_count"), 0)
+            for row in rows
+            if _snow_draft_text(row.get("affected_entities_count"))
+        ]
+        merged_row = dict(representative)
+        for field in [
+            "ticket_number",
+            "ticket_url",
+            "ticket_match_key",
+            "open_ticket_count_for_check",
+            "ticket_count_for_check",
+        ]:
+            merged_row[field] = _snow_draft_first_nonempty([representative, *rows], field)
+        merged_row.update(
+            {
+                "snow_draft_group_key": group_key,
+                "snow_draft_hidden_key": f"group:{group_key}",
+                "snow_draft_is_hidden": any(bool(row.get("snow_draft_is_hidden")) for row in rows),
+                "snow_draft_duplicate_count": len(rows),
+                "snow_draft_group_rows": sorted_group_rows,
+                "snow_draft_representative_row": representative,
+                "snow_draft_latest_alert_datetime": latest_ts,
+                "snow_draft_has_alert_datetime": _snow_draft_is_valid_datetime(latest_ts),
+                "snow_draft_affected_total": sum(affected_values) if affected_values else "",
+                "snow_draft_is_high_impact": _snow_draft_is_high_impact(representative),
+                "snow_draft_is_integration_failure": _snow_draft_is_integration_failure(representative),
+                "snow_draft_is_servicenow_mapped": any(_snow_draft_is_servicenow_mapped(row) for row in rows),
+                "snow_draft_is_passed_configuration_drift": _snow_draft_is_passed_configuration_drift(representative),
+                "snow_draft_is_disabled": bool(disabled_reason),
+                "snow_draft_disabled_reason": disabled_reason,
+            }
+        )
+        grouped_rows.append(merged_row)
+
+    grouped_df = pd.DataFrame(grouped_rows)
+    if grouped_df.empty:
+        return grouped_df
+
+    grouped_df = grouped_df.sort_values(
+        by=[
+            "snow_draft_has_alert_datetime",
+            "snow_draft_latest_alert_datetime",
+            "snow_draft_is_high_impact",
+            "snow_draft_is_integration_failure",
+        ],
+        ascending=[False, False, False, False],
+        kind="mergesort",
+    ).reset_index(drop=True)
+    grouped_df["draft_group_row_id"] = grouped_df.index.astype(int)
+    return grouped_df
+
+
+def _snow_draft_raw_table_html(df: pd.DataFrame, title: str = SNOW_DRAFT_RAW_TABLE_TITLE) -> str:
+    if df is None or df.empty:
+        table_html = "<p style='margin:8px 0;color:#64748b'>No rows.</p>"
+    else:
+        table_html = df.head(100).to_html(index=False, escape=True)
+    return (
+        "<details class='snow-draft-raw-table' style='margin-top:12px'>"
+        f"<summary style='cursor:pointer;font-weight:600;color:#334155'>{_snow_draft_html_escape(title)}</summary>"
+        "<div style='max-height:420px;overflow:auto;margin-top:8px'>"
+        f"{table_html}"
+        "</div>"
+        "</details>"
+    )
+
+
+def _snow_draft_compact_json(value: Any) -> str:
+    if value in (None, "", [], {}):
+        return ""
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    except Exception:
+        return _snow_draft_text(value)
+
+
+def _snow_draft_unique_entities(values: Any) -> list[str]:
+    seen = set()
+    entities = []
+    for value in values:
+        for entity in _snow_draft_split_entities(value):
+            key = entity.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            entities.append(entity)
+    return entities
+
+
+def _snow_draft_group_row_entities(row: dict[str, Any]) -> list[str]:
+    rows = row.get("snow_draft_group_rows")
+    if not isinstance(rows, list):
+        rows = [row]
+    return _snow_draft_unique_entities(item.get("affected_entities_detail") for item in rows if isinstance(item, dict))
+
+
+def _snow_draft_entity_records(row: dict[str, Any], group: dict[str, Any] | None) -> list[dict[str, Any]]:
+    records = group.get("entity_records") if group else row.get("entity_records")
+    if not isinstance(records, list):
+        return []
+    return [record for record in records if isinstance(record, dict)]
+
+
+def _snow_draft_entity_name_from_record(record: dict[str, Any]) -> str:
+    return _snow_draft_text(record.get("entity_name")) or _snow_draft_text(record.get("name")) or "Unnamed entity"
+
+
+def _snow_draft_entity_names(row: dict[str, Any], group: dict[str, Any] | None = None) -> list[str]:
+    if group and _snow_draft_text(group.get("affected_scope")).lower() == "global":
+        return ["Global setting (not entity-scoped)."]
+
+    records = _snow_draft_entity_records(row, group)
+    if records:
+        return _snow_draft_unique_entities(_snow_draft_entity_name_from_record(record) for record in records)
+
+    if group:
+        group_entities = _snow_draft_unique_entities(group.get("entities") or [])
+        if group_entities:
+            return group_entities
+
+    grouped_entities = _snow_draft_group_row_entities(row)
+    if grouped_entities:
+        return grouped_entities
+
+    return _snow_draft_unique_entities([row.get("affected_entities_detail")])
+
+
+def _snow_draft_entity_detail_lines(row: dict[str, Any], group: dict[str, Any] | None) -> list[str]:
+    if group and _snow_draft_text(group.get("affected_scope")).lower() == "global":
+        return ["Global setting (not entity-scoped)."]
+
+    records = _snow_draft_entity_records(row, group)
+    if records:
+        lines = []
+        for index, record in enumerate(records, start=1):
+            fields = [
+                ("name", _snow_draft_entity_name_from_record(record)),
+                ("type", record.get("entity_type")),
+                ("dismissed", record.get("entity_dismissed")),
+                ("dismissed_reason", record.get("entity_dismissed_reason")),
+                ("dismiss_expiration", record.get("entity_dismiss_expiration_date")),
+            ]
+            compact_fields = [
+                f"{label}={_snow_draft_text(value)}"
+                for label, value in fields
+                if _snow_draft_text(value)
+            ]
+            lines.append(f"- Entity {index}: " + (" | ".join(compact_fields) if compact_fields else "N/A"))
+            for label, value in [
+                ("extra_context", record.get("entity_extra_context")),
+                ("usage", record.get("entity_usage")),
+                ("raw", record.get("entity_raw")),
+            ]:
+                json_text = _snow_draft_compact_json(value)
+                if json_text:
+                    lines.append(f"  {label}: {json_text}")
+        return lines
+
+    entities = _snow_draft_entity_names(row, group)
+    if entities:
+        return [f"- {entity}" for entity in entities]
+
+    return ["No entity list returned."]
+
+
+def _snow_draft_affected_count_label(row: dict[str, Any]) -> str:
+    for field in ["snow_draft_affected_total", "affected_count", "affected_entities_count"]:
+        text = _snow_draft_text(row.get(field))
+        if text:
+            return text
+    names = _snow_draft_entity_names(row)
+    return str(len(names)) if names else "N/A"
+
+
+def _snow_draft_badge_html(label: str, bg: str, color: str, border: str) -> str:
+    return (
+        "<span style='display:inline-block;padding:2px 7px;border-radius:999px;"
+        f"font-size:11px;font-weight:700;background:{bg};color:{color};border:1px solid {border};margin-right:4px'>"
+        f"{_snow_draft_html_escape(label)}"
+        "</span>"
+    )
+
+
+def _snow_draft_candidate_grid_header_html() -> str:
+    return (
+        "<div class='snow-draft-grid-header' "
+        "style='display:grid;grid-template-columns:minmax(110px,.8fr) minmax(180px,1fr) minmax(260px,1.5fr) minmax(150px,1fr) minmax(130px,.8fr);"
+        "gap:8px;padding:6px 8px;border-bottom:2px solid #cbd5e1;color:#334155;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0'>"
+        "<div>Alert date</div><div>Integration</div><div>Security check</div><div>Affected</div><div>Ticket/status</div>"
+        "</div>"
+    )
+
+
+def _snow_draft_candidate_grid_html(row: dict[str, Any]) -> str:
+    disabled = bool(row.get("snow_draft_is_disabled"))
+    border = "#e2e8f0"
+    background = "#f8fafc" if disabled else "#ffffff"
+    text_color = "#64748b" if disabled else "#0f172a"
+    integration = _snow_draft_text(row.get("integration_name")) or _snow_draft_text(row.get("saas_name")) or "Unknown integration"
+    alias = _snow_draft_text(row.get("integration_alias"))
+    check_name = _snow_draft_text(row.get("security_check_name")) or _snow_draft_text(row.get("security_check")) or "Unknown security check"
+    latest = _snow_draft_text(row.get("change_datetime")) or "No alert date"
+    affected = _snow_draft_affected_count_label(row)
+    entity_names = _snow_draft_entity_names(row)
+    top_entities = entity_names[:5]
+    detail_lines = _snow_draft_entity_detail_lines(row, None)
+    duplicate_count = _snow_draft_int(row.get("snow_draft_duplicate_count"), 1)
+    ticket_number = _snow_draft_text(row.get("ticket_number"))
+    ticket_url = _snow_draft_safe_http_url(row.get("ticket_url"))
+
+    badges = []
+    if bool(row.get("snow_draft_is_high_impact")):
+        badges.append(_snow_draft_badge_html("High", "#fee2e2", "#991b1b", "#fecaca"))
+    if bool(row.get("snow_draft_is_integration_failure")):
+        badges.append(_snow_draft_badge_html("Integration Failure", "#ffedd5", "#9a3412", "#fed7aa"))
+    alert_type = _snow_draft_alert_type_label(row.get("alert_type"))
+    if alert_type:
+        badges.append(_snow_draft_badge_html(alert_type, "#e0f2fe", "#075985", "#bae6fd"))
+    if duplicate_count > 1:
+        badges.append(_snow_draft_badge_html(f"Merged x{duplicate_count}", "#f1f5f9", "#334155", "#cbd5e1"))
+    if bool(row.get("snow_draft_is_servicenow_mapped")):
+        badges.append(_snow_draft_badge_html("ServiceNow", "#e5e7eb", "#374151", "#d1d5db"))
+    if bool(row.get("snow_draft_is_passed_configuration_drift")):
+        badges.append(_snow_draft_badge_html("Passed", "#e5e7eb", "#374151", "#d1d5db"))
+
+    ticket_html = ""
+    if ticket_number and ticket_url:
+        escaped_url = _snow_draft_html_escape(ticket_url)
+        ticket_html = f"<a href='{escaped_url}' target='_blank' rel='noopener noreferrer'>{_snow_draft_html_escape(ticket_number)}</a>"
+    elif ticket_number:
+        ticket_html = _snow_draft_html_escape(ticket_number)
+
+    disabled_reason = _snow_draft_text(row.get("snow_draft_disabled_reason"))
+    alias_html = f"<span style='color:#64748b'> / {_snow_draft_html_escape(alias)}</span>" if alias else ""
+    ticket_line = ticket_html or "No open ticket"
+    top_entity_html = (
+        "<div style='margin-top:2px;color:#475569'>"
+        + _snow_draft_html_escape(", ".join(top_entities))
+        + (" ..." if len(entity_names) > 5 else "")
+        + "</div>"
+        if top_entities
+        else "<div style='margin-top:2px;color:#94a3b8'>No entity names</div>"
+    )
+    details = [
+        ("Account", row.get("account_name") or row.get("account_id")),
+        ("Alert type", _snow_draft_alert_type_label(row.get("alert_type"))),
+        ("Impact", row.get("impact_level")),
+        ("Current status", row.get("current_status")),
+        ("Merged rows", duplicate_count),
+        ("Disabled reason", disabled_reason),
+        ("Ticket match key", row.get("ticket_match_key")),
+    ]
+    details_html = "".join(
+        f"<div><b>{_snow_draft_html_escape(label)}:</b> {_snow_draft_html_escape(value) or 'N/A'}</div>"
+        for label, value in details
+    )
+    entity_details_html = "<br>".join(_snow_draft_html_escape(line) for line in detail_lines)
+
+    return (
+        "<div class='snow-draft-grid-row' "
+        f"style='width:100%;display:grid;grid-template-columns:minmax(110px,.8fr) minmax(180px,1fr) minmax(260px,1.5fr) minmax(150px,1fr) minmax(130px,.8fr);"
+        f"gap:8px;align-items:start;border-bottom:1px solid {border};background:{background};padding:6px 8px;color:{text_color};font-size:12px;line-height:1.35'>"
+        f"<div style='font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#475569'>{_snow_draft_html_escape(latest)}</div>"
+        f"<div><div style='font-weight:700'>{_snow_draft_html_escape(integration)}{alias_html}</div><div style='margin-top:4px'>{''.join(badges)}</div></div>"
+        f"<div style='font-weight:600'>{_snow_draft_html_escape(check_name)}</div>"
+        f"<div><b>{_snow_draft_html_escape(affected)}</b>{top_entity_html}</div>"
+        f"<div>{ticket_line}</div>"
+        "<details style='grid-column:1 / -1;margin-top:2px;color:#475569'>"
+        "<summary style='cursor:pointer;font-weight:600'>Details</summary>"
+        f"<div style='display:grid;grid-template-columns:repeat(2,minmax(180px,1fr));gap:4px 12px;margin-top:6px'>{details_html}</div>"
+        f"<div style='margin-top:6px'><b>Affected entity details:</b><br>{entity_details_html}</div>"
+        "</details>"
+        "</div>"
+    )
+
+def _snow_draft_load_assignment_mapping(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame(columns=SNOW_DRAFT_MAPPING_COLUMNS)
+
+    mapping_df = pd.read_csv(path, dtype=str).fillna("")
+    for column in SNOW_DRAFT_MAPPING_COLUMNS:
+        if column not in mapping_df.columns:
+            mapping_df[column] = ""
+
+    mapping_df = mapping_df[SNOW_DRAFT_MAPPING_COLUMNS].copy()
+    mapping_df["match_field"] = mapping_df["match_field"].astype(str).str.strip()
+    mapping_df["match_value"] = mapping_df["match_value"].astype(str).str.strip()
+    mapping_df = mapping_df[
+        mapping_df["match_field"].isin(SNOW_DRAFT_ALLOWED_MATCH_FIELDS)
+        & mapping_df["match_value"].astype(bool)
+    ].reset_index(drop=True)
+    return mapping_df
+
+
+def _snow_draft_default_assignment(draft_config: dict[str, Any]) -> dict[str, str]:
+    return {
+        "caller_id": _snow_draft_text(draft_config.get("caller_id")),
+        "assignment_group": _snow_draft_text(draft_config.get("assignment_group")),
+        "assigned_to": _snow_draft_text(draft_config.get("assigned_to")),
+        "category": _snow_draft_text(draft_config.get("category")),
+        "subcategory": _snow_draft_text(draft_config.get("subcategory")),
+        "impact": _snow_draft_text(draft_config.get("impact")),
+        "urgency": _snow_draft_text(draft_config.get("urgency")),
+        "notes": "",
+    }
+
+
+def _snow_draft_assignment_for_row(
+    row: dict[str, Any],
+    mapping_df: pd.DataFrame,
+    draft_config: dict[str, Any],
+) -> dict[str, str]:
+    assignment = _snow_draft_default_assignment(draft_config)
+    if mapping_df is None or mapping_df.empty:
+        return assignment
+
+    for mapping_row in mapping_df.to_dict("records"):
+        match_field = _snow_draft_text(mapping_row.get("match_field"))
+        match_value = _snow_draft_text(mapping_row.get("match_value")).lower()
+        row_value = _snow_draft_text(row.get(match_field)).lower()
+        if not match_field or not match_value or match_value not in row_value:
+            continue
+
+        for column in ["assignment_group", "assigned_to", "category", "subcategory", "impact", "urgency", "notes"]:
+            mapped_value = _snow_draft_text(mapping_row.get(column))
+            if mapped_value:
+                assignment[column] = mapped_value
+        return assignment
+
+    return assignment
+
+
+def _snow_draft_alert_type_label(value: Any) -> str:
+    text = _snow_draft_text(value)
+    if not text:
+        return "Alert"
+
+    normalized = re.sub(r"[_\-]+", " ", text).strip().lower()
+    known_labels = {
+        "configuration drift": "Configuration Drift",
+        "integration failure": "Integration Failure",
+        "check degraded": "Check Degraded",
+        "threat": "Threat",
+    }
+    return known_labels.get(normalized, normalized.title())
+
+
+def _snow_draft_short_description(row: dict[str, Any]) -> str:
+    alert_type = _snow_draft_alert_type_label(row.get("alert_type"))
+    integration_alias = (
+        _snow_draft_text(row.get("integration_alias"))
+        or _snow_draft_text(row.get("integration_name"))
+        or _snow_draft_text(row.get("saas_name"))
+        or "Unknown integration"
+    )
+    check_name = (
+        _snow_draft_text(row.get("security_check_name"))
+        or _snow_draft_text(row.get("security_check"))
+        or _snow_draft_text(row.get("alert_id"))
+        or "Unknown security check"
+    )
+    return f"Falcon Shield {alert_type}: [{integration_alias}] {check_name}"[:160]
+
+
+def _snow_draft_wrapped_text(value: Any, width: int = 96) -> list[str]:
+    text = _snow_draft_text(value)
+    if not text:
+        return ["N/A"]
+
+    lines = []
+    for raw_line in text.splitlines():
+        raw_line = raw_line.strip()
+        if not raw_line:
+            lines.append("")
+            continue
+        lines.extend(textwrap.wrap(raw_line, width=width, replace_whitespace=False) or [raw_line])
+    return lines or ["N/A"]
+
+
+def _snow_draft_section(title: str, body_lines: list[str]) -> list[str]:
+    clean_lines = [line.rstrip() for line in body_lines]
+    return [title, "-" * len(title), *clean_lines, ""]
+
+
+def _snow_draft_plain_section(title: str, body_lines: list[str]) -> list[str]:
+    clean_lines = [line.rstrip() for line in body_lines if line is not None]
+    return [title, "", *clean_lines, ""]
+
+
+def _snow_draft_plain_paragraph_lines(value: Any, *, indent: str = "  ", width: int = 88) -> list[str]:
+    text = _snow_draft_text(value)
+    if not text:
+        return [f"{indent}N/A"]
+
+    lines = []
+    for raw_paragraph in re.split(r"\n\s*\n", text):
+        paragraph = " ".join(part.strip() for part in raw_paragraph.splitlines() if part.strip())
+        if not paragraph:
+            continue
+        wrapped = textwrap.wrap(paragraph, width=max(24, width - len(indent)), replace_whitespace=False)
+        lines.extend(f"{indent}{line}" for line in (wrapped or [paragraph]))
+        lines.append("")
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return lines or [f"{indent}N/A"]
+
+
+def _snow_draft_plain_kv_lines(items: list[tuple[str, Any]], label_width: int = 18) -> list[str]:
+    lines = []
+    for label, value in items:
+        text = _snow_draft_text(value) or "N/A"
+        wrapped = textwrap.wrap(text, width=max(24, 88 - label_width - 5), replace_whitespace=False)
+        if not wrapped:
+            wrapped = ["N/A"]
+        lines.append(f"  {label:<{label_width}}: {wrapped[0]}")
+        for continuation in wrapped[1:]:
+            lines.append(f"  {'':<{label_width}}  {continuation}")
+    return lines
+
+
+def _snow_draft_kv_lines(items: list[tuple[str, Any]], label_width: int = 18) -> list[str]:
+    lines = []
+    for label, value in items:
+        text = _snow_draft_text(value) or "N/A"
+        lines.append(f"{label:<{label_width}}: {text}")
+    return lines
+
+
+def _snow_draft_split_entities(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [_snow_draft_text(item) for item in value if _snow_draft_text(item)]
+
+    text = _snow_draft_text(value)
+    if not text:
+        return []
+    if text.lower() == "global":
+        return ["Global setting (not entity-scoped)."]
+    return [part.strip() for part in re.split(r";|\n", text) if part.strip()]
+
+
+def _snow_draft_entity_lines(row: dict[str, Any], group: dict[str, Any] | None) -> list[str]:
+    return _snow_draft_entity_detail_lines(row, group)
+
+
+def _snow_draft_plain_entity_lines(row: dict[str, Any], group: dict[str, Any] | None) -> list[str]:
+    if group and _snow_draft_text(group.get("affected_scope")).lower() == "global":
+        return ["  Global setting (not entity-scoped)."]
+
+    records = _snow_draft_entity_records(row, group)
+    if records:
+        lines = []
+        for index, record in enumerate(records, start=1):
+            lines.append(f"  {index}. {_snow_draft_entity_name_from_record(record)}")
+            detail_items = [
+                ("Type", record.get("entity_type")),
+                ("Dismissed", record.get("entity_dismissed")),
+                ("Dismissed reason", record.get("entity_dismissed_reason")),
+                ("Dismiss expires", record.get("entity_dismiss_expiration_date")),
+            ]
+            for label, value in detail_items:
+                text = _snow_draft_text(value)
+                if text:
+                    lines.append(f"     {label}: {text}")
+            for label, value in [
+                ("Extra context", record.get("entity_extra_context")),
+                ("Usage", record.get("entity_usage")),
+                ("Raw", record.get("entity_raw")),
+            ]:
+                json_text = _snow_draft_compact_json(value)
+                if json_text:
+                    wrapped = textwrap.wrap(json_text, width=82, replace_whitespace=False)
+                    lines.append(f"     {label}: {wrapped[0] if wrapped else json_text}")
+                    for continuation in wrapped[1:]:
+                        lines.append(f"       {continuation}")
+        return lines
+
+    entities = _snow_draft_entity_names(row, group)
+    if entities:
+        return [f"  {index}. {entity}" for index, entity in enumerate(entities, start=1)]
+
+    return ["  No entity list returned."]
+
+
+def _snow_draft_group_match_score(row: dict[str, Any], group: dict[str, Any]) -> int:
+    score = 0
+    for field in ["account_id", "integration_id", "security_check_id", "security_check_name", "integration_alias", "integration_name", "saas_name"]:
+        row_value = _snow_draft_text(row.get(field)).lower()
+        group_value = _snow_draft_text(group.get(field)).lower()
+        if row_value and group_value and row_value == group_value:
+            score += 2 if field.endswith("_id") else 1
+
+    alert_id = _snow_draft_text(row.get("alert_id"))
+    if alert_id:
+        for history_row in group.get("history") or []:
+            if _snow_draft_text(history_row.get("alert_id")) == alert_id:
+                score += 8
+                break
+    return score
+
+
+def _snow_draft_cell3_group_for_row(row: dict[str, Any]) -> dict[str, Any] | None:
+    try:
+        if not callable(globals().get("build_drift_groups")):
+            return None
+        if "summary_with_snow_df" not in globals() or "entities_df" not in globals():
+            return None
+        groups = build_drift_groups(summary_with_snow_df, entities_df)
+    except Exception:
+        return None
+
+    best_group = None
+    best_score = 0
+    for group in groups:
+        score = _snow_draft_group_match_score(row, group)
+        if score > best_score:
+            best_group = group
+            best_score = score
+    return best_group if best_score >= 3 else None
+
+
+def _snow_draft_history_lines(row: dict[str, Any], group: dict[str, Any] | None) -> list[str]:
+    history = group.get("history") if group else None
+    if not history:
+        return _snow_draft_kv_lines(
+            [
+                ("Latest change", row.get("change_datetime")),
+                ("Status", row.get("current_status")),
+                ("Alert type", _snow_draft_alert_type_label(row.get("alert_type"))),
+                ("Affected", row.get("affected_entities_count")),
+            ],
+            label_width=14,
+        )
+
+    lines = ["Datetime                 | Status   | Alert type            | Affected", "-" * 73]
+    for history_row in history[:20]:
+        lines.append(
+            f"{_snow_draft_text(history_row.get('change_datetime'))[:24]:<24} | "
+            f"{_snow_draft_text(history_row.get('current_status'))[:8]:<8} | "
+            f"{_snow_draft_alert_type_label(history_row.get('alert_type'))[:21]:<21} | "
+            f"{_snow_draft_text(history_row.get('affected_entities_count'))[:8]}"
+        )
+    if len(history) > 20:
+        lines.append(f"... {len(history) - 20} more events")
+    return lines
+
+
+def _snow_draft_html_escape(value: Any) -> str:
+    import html
+
+    return html.escape(_snow_draft_text(value), quote=True)
+
+
+def _snow_draft_safe_http_url(value: Any) -> str:
+    text = _snow_draft_text(value)
+    if not text:
+        return ""
+
+    try:
+        parsed = urlparse(text)
+    except Exception:
+        return ""
+
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        return ""
+    return text
+
+
+def _snow_draft_html_linkify(value: Any) -> str:
+    text = _snow_draft_text(value)
+    if not text:
+        return ""
+
+    parts = []
+    cursor = 0
+    for match in re.finditer(r"https?://[^\s<>]+", text):
+        start, end = match.span()
+        raw_url = match.group(0)
+        trimmed_url = raw_url.rstrip(".,);]\"'")
+        trailing = raw_url[len(trimmed_url):]
+
+        parts.append(_snow_draft_html_escape(text[cursor:start]))
+        safe_url = _snow_draft_safe_http_url(trimmed_url)
+        if safe_url:
+            escaped_url = _snow_draft_html_escape(safe_url)
+            parts.append(
+                f"<a href='{escaped_url}' target='_blank' rel='noopener noreferrer'>{escaped_url}</a>"
+            )
+            parts.append(_snow_draft_html_escape(trailing))
+        else:
+            parts.append(_snow_draft_html_escape(raw_url))
+        cursor = end
+
+    parts.append(_snow_draft_html_escape(text[cursor:]))
+    return "".join(parts)
+
+
+def _snow_draft_html_table(items: list[tuple[str, Any]]) -> str:
+    rows = []
+    for label, value in items:
+        rows.append(
+            "<tr>"
+            f"<th style='text-align:left;vertical-align:top;padding:4px 8px;border:1px solid #d1d5db;background:#f8fafc'>{_snow_draft_html_escape(label)}</th>"
+            f"<td style='padding:4px 8px;border:1px solid #d1d5db'>{_snow_draft_html_linkify(value) or 'N/A'}</td>"
+            "</tr>"
+        )
+    return "<table style='border-collapse:collapse;width:100%;margin:6px 0'>" + "".join(rows) + "</table>"
+
+
+def _snow_draft_html_section(title: str, body_html: str) -> str:
+    return (
+        "<section style='margin:12px 0'>"
+        f"<h3 style='font-size:15px;margin:0 0 6px 0;color:#111827'>{_snow_draft_html_escape(title)}</h3>"
+        f"{body_html}"
+        "</section>"
+    )
+
+
+def _snow_draft_html_paragraphs(value: Any) -> str:
+    lines = _snow_draft_wrapped_text(value)
+    return "".join(f"<p style='margin:0 0 6px 0'>{_snow_draft_html_linkify(line) or '&nbsp;'}</p>" for line in lines)
+
+
+def _snow_draft_html_entities(row: dict[str, Any], group: dict[str, Any] | None) -> str:
+    entity_lines = _snow_draft_entity_lines(row, group)
+    if not entity_lines:
+        return "<p>No entity list returned.</p>"
+
+    items = []
+    for line in entity_lines:
+        clean_line = line[2:] if line.startswith("- ") else line
+        items.append(f"<li>{_snow_draft_html_linkify(clean_line)}</li>")
+    return "<ul style='margin:0 0 0 18px;padding:0'>" + "".join(items) + "</ul>"
+
+
+def _snow_draft_html_history(row: dict[str, Any], group: dict[str, Any] | None) -> str:
+    history = group.get("history") if group else None
+    if not history:
+        return _snow_draft_html_table(
+            [
+                ("Latest change", row.get("change_datetime")),
+                ("Status", row.get("current_status")),
+                ("Alert type", _snow_draft_alert_type_label(row.get("alert_type"))),
+                ("Affected", row.get("affected_entities_count")),
+            ]
+        )
+
+    rows = [
+        "<tr>"
+        "<th style='padding:4px 8px;border:1px solid #d1d5db;background:#f8fafc;text-align:left'>Datetime</th>"
+        "<th style='padding:4px 8px;border:1px solid #d1d5db;background:#f8fafc;text-align:left'>Status</th>"
+        "<th style='padding:4px 8px;border:1px solid #d1d5db;background:#f8fafc;text-align:left'>Alert type</th>"
+        "<th style='padding:4px 8px;border:1px solid #d1d5db;background:#f8fafc;text-align:left'>Affected</th>"
+        "</tr>"
+    ]
+    for history_row in history[:20]:
+        rows.append(
+            "<tr>"
+            f"<td style='padding:4px 8px;border:1px solid #d1d5db'>{_snow_draft_html_escape(history_row.get('change_datetime'))}</td>"
+            f"<td style='padding:4px 8px;border:1px solid #d1d5db'>{_snow_draft_html_escape(history_row.get('current_status'))}</td>"
+            f"<td style='padding:4px 8px;border:1px solid #d1d5db'>{_snow_draft_html_escape(_snow_draft_alert_type_label(history_row.get('alert_type')))}</td>"
+            f"<td style='padding:4px 8px;border:1px solid #d1d5db'>{_snow_draft_html_escape(history_row.get('affected_entities_count'))}</td>"
+            "</tr>"
+        )
+    if len(history) > 20:
+        rows.append(
+            "<tr>"
+            f"<td colspan='4' style='padding:4px 8px;border:1px solid #d1d5db'>... {len(history) - 20} more events</td>"
+            "</tr>"
+        )
+    return "<table style='border-collapse:collapse;width:100%;margin:6px 0'>" + "".join(rows) + "</table>"
+
+
+def _snow_draft_description_html(
+    row: dict[str, Any],
+    assignment: dict[str, str],
+    group: dict[str, Any] | None,
+    source: dict[str, Any],
+    affected_count: Any,
+) -> str:
+    summary_items = [
+        ("Alert type", _snow_draft_alert_type_label(row.get("alert_type"))),
+        ("Alert ID", row.get("alert_id")),
+        ("Account", f"{_snow_draft_text(source.get('account_name'))} ({_snow_draft_text(source.get('account_id'))})"),
+        ("SaaS", source.get("saas_name")),
+        ("Integration", source.get("integration_name")),
+        ("Integration alias", source.get("integration_alias")),
+        ("Security check", source.get("security_check_name") or source.get("security_check_id")),
+        ("Impact", source.get("impact_level")),
+        ("Current status", source.get("current_status")),
+        ("Affected scope", source.get("affected_scope")),
+        ("Affected count", affected_count),
+    ]
+    link_items = [
+        ("Falcon Shield", source.get("security_check_api_link") or row.get("security_check_api_link")),
+        ("Extracted UTC", row.get("extracted_at_utc")),
+        ("Ticket match key", source.get("ticket_match_key") or source.get("check_key") or row.get("ticket_match_key")),
+    ]
+
+    sections = [
+        "<div style='font-family:Arial,sans-serif;font-size:13px;line-height:1.4'>",
+        "<h2 style='font-size:18px;margin:0 0 8px 0;color:#111827'>Falcon Shield Incident Draft</h2>",
+        "<p style='margin:0 0 10px 0'>Generated from the weekly notebook draft creator. Review manually before taking any manual action.</p>",
+        _snow_draft_html_section("Summary", _snow_draft_html_table(summary_items)),
+        _snow_draft_html_section("Links and IDs", _snow_draft_html_table(link_items)),
+        _snow_draft_html_section("Check Details", _snow_draft_html_paragraphs(source.get("security_check_details") or row.get("security_check_details"))),
+        _snow_draft_html_section("Remediation", _snow_draft_html_paragraphs(source.get("remediation_steps") or row.get("remediation_steps"))),
+        _snow_draft_html_section("Affected Entities", _snow_draft_html_entities(row, group)),
+        _snow_draft_html_section("Timeline History", _snow_draft_html_history(row, group)),
+    ]
+
+    assignment_notes = _snow_draft_text(assignment.get("notes"))
+    if assignment_notes:
+        sections.append(_snow_draft_html_section("Assignment Notes", _snow_draft_html_paragraphs(assignment_notes)))
+
+    sections.append("</div>")
+    return "".join(sections)
+
+
+def _snow_draft_description_context(row: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any], Any]:
+    group = _snow_draft_cell3_group_for_row(row)
+    source = group or row
+
+    affected_count = source.get("affected_count") if group else row.get("affected_entities_count")
+    if affected_count in (None, ""):
+        affected_count = row.get("affected_entities_count")
+
+    return group, source, affected_count
+
+
+def _snow_draft_description(row: dict[str, Any], assignment: dict[str, str]) -> str:
+    group, source, affected_count = _snow_draft_description_context(row)
+
+    lines = [
+        "Falcon Shield alert requires ServiceNow incident review.",
+        "",
+        "This draft was generated from the weekly Falcon SaaS Security notebook. Please review",
+        "the alert context, affected entities, and remediation guidance before submitting the",
+        "incident.",
+        "",
+    ]
+
+    lines.extend(
+        _snow_draft_plain_section(
+            "Summary",
+            _snow_draft_plain_kv_lines(
+                [
+                    ("Alert type", _snow_draft_alert_type_label(row.get("alert_type"))),
+                    ("Alert ID", row.get("alert_id")),
+                    ("Account", f"{_snow_draft_text(source.get('account_name'))} ({_snow_draft_text(source.get('account_id'))})"),
+                    ("SaaS", source.get("saas_name")),
+                    ("Integration", source.get("integration_name")),
+                    ("Integration alias", source.get("integration_alias")),
+                    ("Security check", source.get("security_check_name") or source.get("security_check_id")),
+                    ("Impact", source.get("impact_level")),
+                    ("Current status", source.get("current_status")),
+                    ("Affected scope", source.get("affected_scope")),
+                    ("Affected count", affected_count),
+                ],
+                label_width=18,
+            ),
+        )
+    )
+
+    links = _snow_draft_plain_kv_lines(
+        [
+            ("Falcon Shield", source.get("security_check_api_link") or row.get("security_check_api_link")),
+            ("Extracted UTC", row.get("extracted_at_utc")),
+            ("Ticket match key", source.get("ticket_match_key") or source.get("check_key") or row.get("ticket_match_key")),
+        ],
+        label_width=18,
+    )
+    lines.extend(_snow_draft_plain_section("Links and IDs", links))
+
+    lines.extend(
+        _snow_draft_plain_section(
+            "Check Details",
+            _snow_draft_plain_paragraph_lines(source.get("security_check_details") or row.get("security_check_details")),
+        )
+    )
+    lines.extend(
+        _snow_draft_plain_section(
+            "Remediation",
+            _snow_draft_plain_paragraph_lines(source.get("remediation_steps") or row.get("remediation_steps")),
+        )
+    )
+    lines.extend(_snow_draft_plain_section("Affected Entities", _snow_draft_plain_entity_lines(row, group)))
+    lines.extend(_snow_draft_plain_section("Timeline History", [f"  {line}" for line in _snow_draft_history_lines(row, group)]))
+
+    assignment_notes = _snow_draft_text(assignment.get("notes"))
+    if assignment_notes:
+        lines.extend(_snow_draft_plain_section("Assignment Notes", _snow_draft_plain_paragraph_lines(assignment_notes)))
+
+    return "\n".join(lines).strip()
+
+
+def _snow_draft_work_notes(row: dict[str, Any], assignment: dict[str, str]) -> str:
+    group, source, affected_count = _snow_draft_description_context(row)
+    html_text = _snow_draft_description_html(row, assignment, group, source, affected_count)
+    return f"[code]\n{html_text}\n[/code]"
+
+
+def _snow_draft_payload(row: dict[str, Any], assignment: dict[str, str]) -> dict[str, str]:
+    return {
+        "short_description": _snow_draft_short_description(row),
+        "state": SNOW_DRAFT_DEFAULT_STATE_LABEL,
+        "description": _snow_draft_description(row, assignment),
+        "work_notes": _snow_draft_work_notes(row, assignment),
+        "impact": _snow_draft_text(assignment.get("impact")),
+        "urgency": _snow_draft_text(assignment.get("urgency")),
+        "category": _snow_draft_text(assignment.get("category")),
+        "subcategory": _snow_draft_text(assignment.get("subcategory")),
+        "caller_id": _snow_draft_text(assignment.get("caller_id")),
+        "assignment_group": _snow_draft_text(assignment.get("assignment_group")),
+        "assigned_to": _snow_draft_text(assignment.get("assigned_to")),
+    }
+
+
+def _snow_draft_has_g_form(driver: Any) -> bool:
+    try:
+        return bool(driver.execute_script("return typeof window.g_form !== 'undefined' && !!window.g_form.setValue"))
+    except Exception:
+        return False
+
+
+def _snow_draft_switch_to_g_form(driver: Any) -> bool:
+    from selenium.webdriver.common.by import By
+
+    try:
+        driver.switch_to.default_content()
+    except Exception:
+        pass
+
+    if _snow_draft_has_g_form(driver):
+        return True
+
+    frames = []
+    try:
+        frames = driver.find_elements(By.CSS_SELECTOR, "iframe, frame")
+    except Exception:
+        frames = []
+
+    for frame in frames:
+        try:
+            driver.switch_to.default_content()
+            driver.switch_to.frame(frame)
+            if _snow_draft_has_g_form(driver):
+                return True
+        except Exception:
+            continue
+
+    try:
+        driver.switch_to.default_content()
+    except Exception:
+        pass
+    return False
+
+
+def _snow_draft_wait_for_g_form(driver: Any, timeout_seconds: int) -> bool:
+    from selenium.webdriver.support.ui import WebDriverWait
+
+    try:
+        WebDriverWait(driver, timeout_seconds).until(lambda active_driver: _snow_draft_switch_to_g_form(active_driver))
+        return True
+    except Exception:
+        return False
+
+
+def _snow_draft_open_next_tab(driver: Any, timeout_seconds: int, delay_seconds: float) -> None:
+    from selenium.webdriver.support.ui import WebDriverWait
+
+    existing_handles = set(driver.window_handles)
+
+    try:
+        driver.switch_to.new_window("tab")
+    except Exception:
+        driver.execute_script("window.open('about:blank', '_blank');")
+        WebDriverWait(driver, timeout_seconds).until(
+            lambda active_driver: len(active_driver.window_handles) > len(existing_handles)
+        )
+        new_handles = [handle for handle in driver.window_handles if handle not in existing_handles]
+        if not new_handles:
+            raise RuntimeError("Selenium did not expose a new browser tab handle.")
+        driver.switch_to.window(new_handles[-1])
+
+    if delay_seconds > 0:
+        time.sleep(delay_seconds)
+
+
+def _snow_draft_apply_payload(driver: Any, payload: dict[str, str]) -> dict[str, str]:
+    script = """
+const values = arguments[0];
+const referenceFields = new Set(arguments[1]);
+const applied = {};
+
+function setDisplayBox(fieldName, displayValue) {
+  const displayBoxes = [];
+
+  if (window.g_form.getDisplayBox) {
+    const gFormDisplayBox = window.g_form.getDisplayBox(fieldName);
+    if (gFormDisplayBox) {
+      displayBoxes.push(gFormDisplayBox);
+    }
+  }
+
+  const explicitDisplayBox = document.getElementById(`sys_display.incident.${fieldName}`);
+  if (explicitDisplayBox && !displayBoxes.includes(explicitDisplayBox)) {
+    displayBoxes.push(explicitDisplayBox);
+  }
+
+  if (!displayBoxes.length) {
+    return false;
+  }
+
+  for (const displayBox of displayBoxes) {
+    displayBox.value = displayValue;
+    displayBox.setAttribute('value', displayValue);
+    for (const eventName of ['keydown', 'input', 'keyup', 'change', 'blur']) {
+      displayBox.dispatchEvent(new Event(eventName, { bubbles: true }));
+    }
+  }
+  return true;
+}
+
+for (const fieldName of Object.keys(values)) {
+  const value = values[fieldName];
+  if (value === null || value === undefined || String(value).trim() === '') {
+    continue;
+  }
+
+  const textValue = String(value);
+  if (referenceFields.has(fieldName)) {
+    window.g_form.setValue(fieldName, textValue, textValue);
+    setDisplayBox(fieldName, textValue);
+    const hiddenInput = document.getElementById(`incident.${fieldName}`);
+    if (hiddenInput) {
+      hiddenInput.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  } else {
+    window.g_form.setValue(fieldName, textValue);
+  }
+
+  const storedValue = String(window.g_form.getValue(fieldName) || '');
+  const displayValue = window.g_form.getDisplayValue ? String(window.g_form.getDisplayValue(fieldName) || '') : '';
+  applied[fieldName] = displayValue || storedValue;
+}
+return applied;
+"""
+    return driver.execute_script(script, payload, sorted(SNOW_DRAFT_REFERENCE_FIELDS))
+
+
+def _snow_draft_open_selected(
+    selected_rows: list[dict[str, Any]],
+    mapping_df: pd.DataFrame,
+    draft_config: dict[str, Any],
+) -> pd.DataFrame:
+    if not selected_rows:
+        return pd.DataFrame(columns=["alert_id", "draft_status", "tab_index", "caller_id", "short_description", "assignment_group", "assigned_to", "message"])
+
+    base_url = _snow_draft_text(config.get("snow_base_url")).rstrip("/")
+    if not base_url:
+        raise ValueError("SNOW_BASE_URL is required to open ServiceNow draft incidents.")
+
+    previous_headless = config.get("snow_headless", False)
+    config["snow_headless"] = False
+    driver = _build_snow_driver(config)
+    config["snow_headless"] = previous_headless
+
+    create_url = f"{base_url}/incident.do?sys_id=-1"
+    wait_seconds = _snow_draft_int(draft_config.get("wait_seconds"), 60)
+    form_ready_seconds = min(wait_seconds, _snow_draft_int(draft_config.get("form_ready_seconds"), 15))
+    tab_delay_seconds = _snow_draft_float(draft_config.get("tab_delay_seconds"), 1.5)
+    processing_rows = [(row, False) for row in selected_rows]
+    processing_rows.append((selected_rows[0], True))
+    results = []
+
+    for tab_index, (row, is_redundant) in enumerate(processing_rows):
+        row_dict = dict(row)
+        assignment = _snow_draft_assignment_for_row(row_dict, mapping_df, draft_config)
+        payload = _snow_draft_payload(row_dict, assignment)
+        alert_id = _snow_draft_text(row_dict.get("alert_id"))
+
+        try:
+            if tab_index > 0:
+                _snow_draft_open_next_tab(driver, min(wait_seconds, 30), tab_delay_seconds)
+
+            driver.get(create_url)
+            try:
+                _wait_for_document_ready(driver, min(form_ready_seconds, 8))
+            except Exception:
+                pass
+
+            if not _snow_draft_wait_for_g_form(driver, form_ready_seconds):
+                results.append(
+                    {
+                        "alert_id": alert_id,
+                        "draft_status": "manual_fallback_redundant" if is_redundant else "manual_fallback",
+                        "tab_index": tab_index,
+                        "caller_id": assignment.get("caller_id", ""),
+                        "short_description": payload["short_description"],
+                        "assignment_group": assignment.get("assignment_group", ""),
+                        "assigned_to": assignment.get("assigned_to", ""),
+                        "message": ("Redundant first-alert retry. " if is_redundant else "") + "g_form was not found; use the printed payload for manual entry.",
+                    }
+                )
+                print("Manual fallback payload for alert", alert_id)
+                print(json.dumps(payload, indent=2, ensure_ascii=False))
+                if tab_delay_seconds > 0:
+                    time.sleep(tab_delay_seconds)
+                continue
+
+            applied = _snow_draft_apply_payload(driver, payload)
+            results.append(
+                {
+                    "alert_id": alert_id,
+                    "draft_status": "prefilled_redundant" if is_redundant else "prefilled",
+                    "tab_index": tab_index,
+                    "caller_id": assignment.get("caller_id", ""),
+                    "short_description": payload["short_description"],
+                    "assignment_group": assignment.get("assignment_group", ""),
+                    "assigned_to": assignment.get("assigned_to", ""),
+                    "message": ("Redundant first-alert retry. " if is_redundant else "") + f"Applied fields: {', '.join(sorted(applied.keys()))}",
+                }
+            )
+            if tab_delay_seconds > 0:
+                time.sleep(tab_delay_seconds)
+        except Exception as exc:
+            results.append(
+                {
+                    "alert_id": alert_id,
+                    "draft_status": "failed_redundant" if is_redundant else "failed",
+                    "tab_index": tab_index,
+                    "caller_id": assignment.get("caller_id", ""),
+                    "short_description": payload["short_description"],
+                    "assignment_group": assignment.get("assignment_group", ""),
+                    "assigned_to": assignment.get("assigned_to", ""),
+                    "message": ("Redundant first-alert retry. " if is_redundant else "") + str(exc),
+                }
+            )
+
+    return pd.DataFrame(results)
+
+
+def _snow_draft_option_label(row: dict[str, Any]) -> str:
+    parts = [
+        f"#{row.get('draft_group_row_id', row.get('draft_row_id'))}",
+        _snow_draft_text(row.get("impact_level")) or "impact:N/A",
+        _snow_draft_text(row.get("alert_type")) or "alert:N/A",
+        _snow_draft_text(row.get("security_check_name")) or "check:N/A",
+        _snow_draft_text(row.get("integration_name")) or _snow_draft_text(row.get("saas_name")) or "integration:N/A",
+        _snow_draft_text(row.get("account_name")) or "account:N/A",
+        f"latest:{_snow_draft_text(row.get('change_datetime')) or 'N/A'}",
+        f"merged:{_snow_draft_int(row.get('snow_draft_duplicate_count'), 1)}",
+    ]
+    reason = _snow_draft_text(row.get("snow_draft_disabled_reason"))
+    if reason:
+        parts.append(f"disabled:{reason}")
+    return " | ".join(parts)
+
+def _snow_draft_render_ui() -> None:
+    draft_config = _snow_draft_config()
+    mapping_df = _snow_draft_load_assignment_mapping(draft_config["mapping_path"])
+    hidden_registry = _snow_draft_load_hidden_registry(draft_config["hidden_alerts_path"])
+    base_candidates_df = _snow_draft_missing_ticket_candidates(summary_with_snow_df)
+    candidates_df = _snow_draft_candidates_with_hidden_state(base_candidates_df, hidden_registry)
+    grouped_candidates_df = _snow_draft_grouped_candidates_df(candidates_df)
+
+    hidden_count = int(grouped_candidates_df["snow_draft_is_hidden"].sum()) if "snow_draft_is_hidden" in grouped_candidates_df.columns else 0
+    disabled_count = int(grouped_candidates_df["snow_draft_is_disabled"].sum()) if "snow_draft_is_disabled" in grouped_candidates_df.columns else 0
+
+    print("ServiceNow draft assignment mapping:", draft_config["mapping_path"])
+    print("Hidden Falcon Shield alert memory:", draft_config["hidden_alerts_path"])
+    print("Mapping rows loaded:", len(mapping_df))
+    print("Draft candidate rows:", len(candidates_df))
+    print("Draft candidate groups:", len(grouped_candidates_df))
+    print("Hidden groups:", hidden_count)
+    print("Disabled groups:", disabled_count)
+
+    if grouped_candidates_df.empty:
+        display(HTML('<div style="padding:10px;border:1px solid #ddd;border-radius:8px;">No Falcon Shield alert rows found.</div>'))
+        return
+
+    if widgets is None:
+        visible_df = grouped_candidates_df[~grouped_candidates_df["snow_draft_is_hidden"]].copy()
+        print("ipywidgets is required for checkbox selection in this cell.")
+        display(HTML(_snow_draft_raw_table_html(visible_df)))
+        return
+
+    show_hidden_checkbox = widgets.Checkbox(
+        value=False,
+        description="Show hidden Falcon Shield alerts",
+        indent=False,
+    )
+    show_passed_checkbox = widgets.Checkbox(
+        value=True,
+        description="Show Passed",
+        indent=False,
+    )
+    show_existing_ticket_checkbox = widgets.Checkbox(
+        value=True,
+        description="Show existing tickets",
+        indent=False,
+    )
+    sort_order_dropdown = widgets.Dropdown(
+        options=[
+            ("Alert date: newest first", "latest"),
+            ("Alert date: oldest first", "oldest"),
+        ],
+        value="latest",
+        description="Sort",
+        layout=widgets.Layout(width="260px"),
+    )
+
+    candidate_summary = widgets.HTML()
+    raw_table_output = widgets.Output()
+    raw_table_accordion = widgets.Accordion(children=[raw_table_output])
+    raw_table_accordion.set_title(0, SNOW_DRAFT_RAW_TABLE_TITLE)
+    raw_table_accordion.selected_index = None
+    candidate_box = widgets.VBox([])
+    output = widgets.Output()
+    checkboxes: list[Any] = []
+    row_records: list[dict[str, Any]] = []
+
+    def _sort_visible_df(df: pd.DataFrame) -> pd.DataFrame:
+        if df.empty:
+            return df
+        sort_latest_first = sort_order_dropdown.value == "latest"
+        return df.sort_values(
+            by=[
+                "snow_draft_has_alert_datetime",
+                "snow_draft_latest_alert_datetime",
+                "snow_draft_is_high_impact",
+                "snow_draft_is_integration_failure",
+            ],
+            ascending=[False, not sort_latest_first, False, False],
+            kind="mergesort",
+        ).reset_index(drop=True)
+
+    def _current_grouped_df() -> pd.DataFrame:
+        refreshed_df = _snow_draft_candidates_with_hidden_state(base_candidates_df, hidden_registry)
+        grouped_df = _snow_draft_grouped_candidates_df(refreshed_df)
+        if grouped_df.empty:
+            return grouped_df
+        if not bool(show_hidden_checkbox.value):
+            grouped_df = grouped_df[~grouped_df["snow_draft_is_hidden"]].copy()
+        if not bool(show_passed_checkbox.value):
+            grouped_df = grouped_df[~grouped_df["snow_draft_is_passed_configuration_drift"]].copy()
+        if not bool(show_existing_ticket_checkbox.value):
+            grouped_df = grouped_df[~grouped_df["snow_draft_is_servicenow_mapped"]].copy()
+        return _sort_visible_df(grouped_df)
+
+    def _render_candidate_list() -> None:
+        nonlocal checkboxes, row_records
+        current_df = _current_grouped_df()
+        current_hidden_count = int(current_df["snow_draft_is_hidden"].sum()) if not current_df.empty else 0
+        current_disabled_count = int(current_df["snow_draft_is_disabled"].sum()) if not current_df.empty else 0
+        total_hidden_count = len(hidden_registry.get("hidden_keys", {}))
+        duplicate_count = int(current_df["snow_draft_duplicate_count"].map(lambda value: max(_snow_draft_int(value, 1) - 1, 0)).sum()) if not current_df.empty else 0
+        candidate_summary.value = (
+            f"<b>ServiceNow draft incident candidates</b><br>"
+            f"<span style='font-size:12px;color:#475569'>"
+            f"Showing {len(current_df)} group(s); auto-hidden duplicate rows: {duplicate_count}. "
+            f"Disabled groups: {current_disabled_count}. Hidden memory has {total_hidden_count} alert/check key(s). "
+            f"Hidden visible now: {current_hidden_count}. Sorted by alert date."
+            f"</span>"
+        )
+
+        with raw_table_output:
+            clear_output(wait=True)
+            if current_df.empty:
+                display(HTML(_snow_draft_raw_table_html(pd.DataFrame())))
+            else:
+                display_columns = [
+                    "draft_group_row_id",
+                    "snow_draft_is_hidden",
+                    "snow_draft_is_disabled",
+                    "snow_draft_disabled_reason",
+                    "snow_draft_duplicate_count",
+                    "change_datetime",
+                    *SNOW_DRAFT_DISPLAY_COLUMNS,
+                    "ticket_number",
+                    "ticket_match_key",
+                ]
+                display_columns = [column for column in display_columns if column in current_df.columns]
+                display(current_df[display_columns].head(100))
+
+        row_records = current_df.to_dict("records")
+        checkboxes = []
+        children: list[Any] = [widgets.HTML(_snow_draft_candidate_grid_header_html())]
+        for row in row_records[:100]:
+            checkbox = widgets.Checkbox(
+                value=False,
+                description="",
+                indent=False,
+                disabled=bool(row.get("snow_draft_is_disabled")),
+                layout=widgets.Layout(width="28px", flex="0 0 28px"),
+            )
+            checkboxes.append(checkbox)
+            children.append(
+                widgets.HBox(
+                    [checkbox, widgets.HTML(_snow_draft_candidate_grid_html(row))],
+                    layout=widgets.Layout(width="100%", align_items="flex-start"),
+                )
+            )
+
+        if len(row_records) > 100:
+            children.append(widgets.HTML("<span style='font-size:12px;color:#b45309'>Only the first 100 visible groups are shown as checkboxes.</span>"))
+        if not row_records:
+            children.append(widgets.HTML("<span style='font-size:12px;color:#475569'>No visible candidates.</span>"))
+        candidate_box.children = tuple(children)
+
+    def _selected_rows() -> list[dict[str, Any]]:
+        selected = []
+        for checkbox, row in zip(checkboxes, row_records):
+            if bool(getattr(checkbox, "disabled", False)):
+                continue
+            if bool(checkbox.value):
+                selected.append(dict(row))
+        return selected
+
+    def _save_hidden_registry_and_render(message: str) -> None:
+        _snow_draft_save_hidden_registry(draft_config["hidden_alerts_path"], hidden_registry)
+        _render_candidate_list()
+        with output:
+            clear_output(wait=True)
+            print(message)
+            print("Hidden Falcon Shield alert memory:", draft_config["hidden_alerts_path"])
+
+    def _on_select_all(_: Any) -> None:
+        for checkbox in checkboxes:
+            if not bool(getattr(checkbox, "disabled", False)):
+                checkbox.value = True
+
+    def _on_clear(_: Any) -> None:
+        for checkbox in checkboxes:
+            checkbox.value = False
+
+    def _on_hide_selected(_: Any) -> None:
+        selected = _selected_rows()
+        if not selected:
+            with output:
+                clear_output(wait=True)
+                print("No alerts selected to hide.")
+            return
+
+        hidden_keys = hidden_registry.setdefault("hidden_keys", {})
+        for row in selected:
+            hidden_keys[_snow_draft_hidden_key(row)] = _snow_draft_hidden_entry(row)
+        _save_hidden_registry_and_render(f"Hidden {len(selected)} selected Falcon Shield alert/check group(s).")
+
+    def _on_unhide_selected(_: Any) -> None:
+        selected = []
+        for checkbox, row in zip(checkboxes, row_records):
+            if bool(checkbox.value):
+                selected.append(row)
+        if not selected:
+            with output:
+                clear_output(wait=True)
+                print("No alerts selected to unhide.")
+            return
+
+        hidden_keys = hidden_registry.setdefault("hidden_keys", {})
+        removed_count = 0
+        for row in selected:
+            key = _snow_draft_hidden_key(row)
+            if key in hidden_keys:
+                hidden_keys.pop(key, None)
+                removed_count += 1
+        _save_hidden_registry_and_render(f"Unhid {removed_count} selected Falcon Shield alert/check group(s).")
+
+    def _on_clear_hidden_memory(_: Any) -> None:
+        hidden_count_before = len(hidden_registry.get("hidden_keys", {}))
+        hidden_registry["hidden_keys"] = {}
+        _save_hidden_registry_and_render(f"Cleared {hidden_count_before} hidden Falcon Shield alert/check key(s).")
+
+    def _on_filter_or_sort_change(change: dict[str, Any]) -> None:
+        if change.get("name") == "value":
+            _render_candidate_list()
+
+    def _on_open(_: Any) -> None:
+        selected = _selected_rows()
+        with output:
+            clear_output(wait=True)
+            if not selected:
+                print("No alerts selected.")
+                return
+            if len(selected) > int(draft_config["max_rows"]):
+                print(f"Selected {len(selected)} alerts, but SNOW_DRAFT_MAX_ROWS is {draft_config['max_rows']}.")
+                return
+
+            print(f"Opening {len(selected) + 1} ServiceNow draft tab(s) in one browser session, including a redundant retry for the first selected alert...")
+            result_df = _snow_draft_open_selected(selected, mapping_df, draft_config)
+            display(result_df)
+            print("Review each ServiceNow tab manually. This cell only pre-fills fields.")
+
+    select_all_button = widgets.Button(description="Select all visible")
+    clear_button = widgets.Button(description="Clear")
+    hide_selected_button = widgets.Button(description="Hide Selected", button_style="danger")
+    unhide_selected_button = widgets.Button(description="Unhide Selected")
+    clear_hidden_button = widgets.Button(description="Clear Hidden Memory")
+    open_button = widgets.Button(description="Open Selected Drafts", button_style="warning")
+
+    select_all_button.on_click(_on_select_all)
+    clear_button.on_click(_on_clear)
+    hide_selected_button.on_click(_on_hide_selected)
+    unhide_selected_button.on_click(_on_unhide_selected)
+    clear_hidden_button.on_click(_on_clear_hidden_memory)
+    open_button.on_click(_on_open)
+    show_hidden_checkbox.observe(_on_filter_or_sort_change, names="value")
+    show_passed_checkbox.observe(_on_filter_or_sort_change, names="value")
+    show_existing_ticket_checkbox.observe(_on_filter_or_sort_change, names="value")
+    sort_order_dropdown.observe(_on_filter_or_sort_change, names="value")
+
+    _render_candidate_list()
+
+    display(
+        widgets.VBox(
+            [
+                candidate_summary,
+                widgets.HTML(
+                    "<span style='font-size:12px;color:#475569'>Select alert/check groups, then open pre-filled ServiceNow draft tabs for manual review. Duplicates are merged by account, integration, and check. ServiceNow-mapped and Passed items are greyed out unless hidden by filter.</span>"
+                ),
+                widgets.HBox([show_hidden_checkbox, show_passed_checkbox, show_existing_ticket_checkbox, sort_order_dropdown]),
+                widgets.HBox([select_all_button, clear_button, hide_selected_button, unhide_selected_button]),
+                widgets.HBox([clear_hidden_button, open_button]),
+                candidate_box,
+                output,
+                raw_table_accordion,
+            ]
+        )
+    )
+
+_snow_draft_render_ui()
