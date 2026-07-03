@@ -296,3 +296,172 @@ def test_service_now_draft_payload_uses_falcon_copy() -> None:
     assert "Adaptive Shield" not in payload["description"]
     assert "Adaptive Shield" not in payload["work_notes"]
 
+
+def test_service_now_draft_candidates_merge_and_disable_groups() -> None:
+    namespace = _exec_weekly_report_draft_cell_definitions()
+    summary_df = pd.DataFrame(
+        [
+            {
+                "alert_id": "old-slack",
+                "alert_type": "configuration_drift",
+                "account_id": "acct-1",
+                "account_name": "Primary",
+                "integration_id": "int-slack",
+                "integration_name": "Slack Enterprise",
+                "integration_alias": "Slack",
+                "security_check_id": "check-mfa",
+                "security_check_name": "MFA required",
+                "impact_level": "Medium",
+                "current_status": "Failed",
+                "affected_entities_count": 1,
+                "change_datetime": "2026-07-01T00:00:00Z",
+            },
+            {
+                "alert_id": "new-slack",
+                "alert_type": "configuration_drift",
+                "account_id": "acct-1",
+                "account_name": "Primary",
+                "integration_id": "int-slack",
+                "integration_name": "Slack Enterprise",
+                "integration_alias": "Slack",
+                "security_check_id": "check-mfa",
+                "security_check_name": "MFA required",
+                "impact_level": "High",
+                "current_status": "Failed",
+                "affected_entities_count": 3,
+                "change_datetime": "2026-07-03T00:00:00Z",
+            },
+            {
+                "alert_id": "mapped-box",
+                "alert_type": "integration_failure",
+                "account_id": "acct-1",
+                "account_name": "Primary",
+                "integration_id": "int-box",
+                "integration_name": "Box",
+                "security_check_id": "check-conn",
+                "security_check_name": "Connection healthy",
+                "impact_level": "High",
+                "current_status": "Failed",
+                "open_ticket_count_for_check": 1,
+                "ticket_number": "INC001",
+                "ticket_match_key": "box | connection healthy",
+                "change_datetime": "2026-07-02T00:00:00Z",
+            },
+            {
+                "alert_id": "passed-zoom",
+                "alert_type": "configuration_drift",
+                "account_id": "acct-1",
+                "account_name": "Primary",
+                "integration_id": "int-zoom",
+                "integration_name": "Zoom",
+                "security_check_id": "check-recording",
+                "security_check_name": "Recording policy",
+                "impact_level": "Low",
+                "current_status": " Passed ",
+                "change_datetime": "2026-07-04T00:00:00Z",
+            },
+        ]
+    )
+
+    candidates_df = namespace["_snow_draft_missing_ticket_candidates"](summary_df)
+    candidates_df = namespace["_snow_draft_candidates_with_hidden_state"](
+        candidates_df,
+        {"hidden_keys": {}},
+    )
+    grouped_df = namespace["_snow_draft_grouped_candidates_df"](candidates_df)
+
+    assert len(grouped_df) == 3
+
+    slack_group = grouped_df[grouped_df["integration_name"] == "Slack Enterprise"].iloc[0]
+    assert slack_group["alert_id"] == "new-slack"
+    assert slack_group["snow_draft_duplicate_count"] == 2
+    assert bool(slack_group["snow_draft_is_high_impact"]) is True
+    assert bool(slack_group["snow_draft_is_disabled"]) is False
+
+    mapped_group = grouped_df[grouped_df["integration_name"] == "Box"].iloc[0]
+    assert bool(mapped_group["snow_draft_is_disabled"]) is True
+    assert bool(mapped_group["snow_draft_is_servicenow_mapped"]) is True
+    assert "ServiceNow" in mapped_group["snow_draft_disabled_reason"]
+    assert "INC001" in mapped_group["snow_draft_disabled_reason"]
+
+    passed_group = grouped_df[grouped_df["integration_name"] == "Zoom"].iloc[0]
+    assert bool(passed_group["snow_draft_is_disabled"]) is True
+    assert bool(passed_group["snow_draft_is_passed_configuration_drift"]) is True
+    assert passed_group["snow_draft_disabled_reason"] == "Configuration drift is Passed"
+
+
+def test_service_now_draft_candidates_sort_by_latest_alert_date_then_priority() -> None:
+    namespace = _exec_weekly_report_draft_cell_definitions()
+    summary_df = pd.DataFrame(
+        [
+            {
+                "alert_id": "same-day-failure",
+                "alert_type": "integration_failure",
+                "account_id": "acct-1",
+                "integration_id": "int-a",
+                "integration_name": "A",
+                "security_check_id": "check-a",
+                "security_check_name": "A check",
+                "impact_level": "Medium",
+                "change_datetime": "2026-07-02T00:00:00Z",
+            },
+            {
+                "alert_id": "latest-low",
+                "alert_type": "configuration_drift",
+                "account_id": "acct-1",
+                "integration_id": "int-b",
+                "integration_name": "B",
+                "security_check_id": "check-b",
+                "security_check_name": "B check",
+                "impact_level": "Low",
+                "change_datetime": "2026-07-03T00:00:00Z",
+            },
+            {
+                "alert_id": "same-day-high",
+                "alert_type": "configuration_drift",
+                "account_id": "acct-1",
+                "integration_id": "int-c",
+                "integration_name": "C",
+                "security_check_id": "check-c",
+                "security_check_name": "C check",
+                "impact_level": "High",
+                "change_datetime": "2026-07-02T00:00:00Z",
+            },
+            {
+                "alert_id": "missing-date",
+                "alert_type": "configuration_drift",
+                "account_id": "acct-1",
+                "integration_id": "int-d",
+                "integration_name": "D",
+                "security_check_id": "check-d",
+                "security_check_name": "D check",
+                "impact_level": "High",
+                "change_datetime": "",
+            },
+        ]
+    )
+
+    candidates_df = namespace["_snow_draft_candidates_with_hidden_state"](
+        namespace["_snow_draft_missing_ticket_candidates"](summary_df),
+        {"hidden_keys": {}},
+    )
+    grouped_df = namespace["_snow_draft_grouped_candidates_df"](candidates_df)
+
+    assert grouped_df["alert_id"].tolist() == [
+        "latest-low",
+        "same-day-high",
+        "same-day-failure",
+        "missing-date",
+    ]
+
+
+def test_service_now_draft_raw_table_is_collapsed_by_default() -> None:
+    namespace = _exec_weekly_report_draft_cell_definitions()
+    html = namespace["_snow_draft_raw_table_html"](
+        pd.DataFrame([{"integration_name": "Slack", "security_check_name": "MFA"}])
+    )
+    draft_cell = "".join(_weekly_report_notebook_cells()[5].get("source", ""))
+
+    assert "<details class='snow-draft-raw-table'" in html
+    assert "<details class='snow-draft-raw-table' open" not in html
+    assert "raw_table_accordion.selected_index = None" in draft_cell
