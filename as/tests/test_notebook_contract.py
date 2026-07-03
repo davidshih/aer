@@ -221,6 +221,9 @@ def test_service_now_mapping_editor_fields_and_first_match(
     assert assignment["assignment_group"] == "First Team"
     assert assignment["assigned_to"] == "First Owner"
 
+    mapping_cell = "".join(_weekly_report_notebook_cells()[4].get("source", ""))
+    assert 'clear_output_fn = globals().get("clear_output")' in mapping_cell
+
 def test_falcon_servicenow_defaults_and_guides_use_falcon_copy() -> None:
     project_root = Path(__file__).resolve().parents[1]
     env_example = (project_root / ".env.example").read_text()
@@ -291,7 +294,11 @@ def test_service_now_draft_payload_uses_falcon_copy() -> None:
     )
 
     assert payload["short_description"] == "Falcon Shield Configuration Drift: [Slack] MFA required"
+    assert payload["state"] == "In Progress"
     assert "Falcon Shield alert requires ServiceNow incident review." in payload["description"]
+    assert "This draft was generated from the weekly Falcon SaaS Security notebook." in payload["description"]
+    assert "Summary\n\n  Alert type" in payload["description"]
+    assert "Check Details\n\n  N/A" in payload["description"]
     assert "Falcon Shield Incident Draft" in payload["work_notes"]
     assert "Falcon Shield" in payload["work_notes"]
     assert "Adaptive Shield" not in payload["short_description"]
@@ -326,6 +333,52 @@ def test_service_now_draft_payload_includes_all_affected_entities() -> None:
     assert "user-60@example.com" in payload["description"]
     assert "user-60@example.com" in payload["work_notes"]
     assert "... 10 more" not in payload["description"]
+
+
+def test_service_now_draft_assignment_mapping_and_form_population_contract() -> None:
+    namespace = _exec_weekly_report_draft_cell_definitions()
+    mapping_df = pd.DataFrame(
+        [
+            {
+                "match_field": "integration_alias",
+                "match_value": "Slack",
+                "assignment_group": "Identity Security",
+                "assigned_to": "Alex Owner",
+                "category": "Security",
+                "subcategory": "SaaS",
+                "impact": "2",
+                "urgency": "2",
+                "notes": "Route Slack Falcon Shield alerts to identity security.",
+            }
+        ]
+    )
+    assignment = namespace["_snow_draft_assignment_for_row"](
+        {"integration_alias": "Slack", "integration_name": "Slack Enterprise"},
+        mapping_df,
+        {"assignment_group": "Default Group", "assigned_to": "Default Owner"},
+    )
+    payload = namespace["_snow_draft_payload"](
+        {
+            "alert_id": "alert-slack",
+            "alert_type": "configuration_drift",
+            "integration_alias": "Slack",
+            "integration_name": "Slack Enterprise",
+            "security_check_name": "MFA required",
+        },
+        assignment,
+    )
+    draft_cell = "".join(_weekly_report_notebook_cells()[5].get("source", ""))
+
+    assert assignment["assignment_group"] == "Identity Security"
+    assert assignment["assigned_to"] == "Alex Owner"
+    assert payload["assignment_group"] == "Identity Security"
+    assert payload["assigned_to"] == "Alex Owner"
+    assert payload["state"] == "In Progress"
+    assert "execute_async_script" in draft_cell
+    assert "SNOW_DRAFT_REFERENCE_TABLES" in draft_cell
+    assert "lookupReferenceSysId" in draft_cell
+    assert "setChoiceByLabel" in draft_cell
+    assert "SNOW_DRAFT_FORM_READY_SECONDS" in draft_cell
 
 
 def test_service_now_draft_candidates_merge_and_disable_groups() -> None:
