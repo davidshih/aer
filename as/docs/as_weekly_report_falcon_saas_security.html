@@ -550,7 +550,7 @@ FS_CLIENT_SECRET=your_client_secret</code></pre>
       </div>
       <div class="mini-card blue" style="background: var(--blue-soft); border-color: #38bdf8; margin-top: 14px;">
         <strong>Draft population method</strong>
-        Field population uses the existing ServiceNow page session with <code>g_form.setValue(...)</code> and display-box events. It does not call the ServiceNow Table API or REST lookups while creating draft tabs, so it should not trigger an extra sign-in prompt.
+        Field population uses the existing ServiceNow page session with <code>g_form.setValue(...)</code> and display-box events. Reference display boxes are written directly through ids such as <code>sys_display.incident.assignment_group</code> and <code>sys_display.incident.assigned_to</code>. It does not call the ServiceNow Table API or REST lookups while creating draft tabs, so it should not trigger an extra sign-in prompt.
       </div>
       <div class="mini-card yellow" style="background: var(--yellow-soft); border-color: #facc15; margin-top: 14px;">
         <strong>Hidden memory</strong>

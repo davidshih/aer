@@ -379,6 +379,8 @@ def test_service_now_draft_assignment_mapping_and_form_population_contract() -> 
     assert "SNOW_DRAFT_REFERENCE_TABLES" not in draft_cell
     assert "lookupReferenceSysId" not in draft_cell
     assert "/api/now/table/" not in draft_cell
+    assert "sys_display.incident.${fieldName}" in draft_cell
+    assert "document.getElementById(`incident.${fieldName}`)" in draft_cell
     assert "SNOW_DRAFT_FORM_READY_SECONDS" in draft_cell
 
 
