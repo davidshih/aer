@@ -8,6 +8,7 @@ import re
 import textwrap
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import pandas as pd
 import pytest
@@ -90,6 +91,7 @@ def _exec_weekly_report_draft_cell_definitions() -> dict[str, Any]:
         "pd": pd,
         "re": re,
         "textwrap": textwrap,
+        "urlparse": urlparse,
         "widgets": None,
     }
     exec(draft_cell, namespace)
@@ -297,6 +299,35 @@ def test_service_now_draft_payload_uses_falcon_copy() -> None:
     assert "Adaptive Shield" not in payload["work_notes"]
 
 
+def test_service_now_draft_payload_includes_all_affected_entities() -> None:
+    namespace = _exec_weekly_report_draft_cell_definitions()
+    affected_entities = [f"user-{index:02d}@example.com" for index in range(1, 61)]
+    payload = namespace["_snow_draft_payload"](
+        {
+            "alert_id": "alert-entities",
+            "alert_type": "configuration_drift",
+            "account_name": "Primary",
+            "account_id": "cid-1",
+            "integration_name": "Slack Enterprise",
+            "integration_alias": "Slack",
+            "security_check_name": "MFA required",
+            "affected_scope": "entity",
+            "affected_entities_count": len(affected_entities),
+            "affected_entities_detail": "; ".join(affected_entities),
+            "snow_draft_group_rows": [
+                {"affected_entities_detail": "; ".join(affected_entities[:30])},
+                {"affected_entities_detail": "; ".join(affected_entities[30:])},
+            ],
+        },
+        {"impact": "2", "urgency": "2", "category": "Security"},
+    )
+
+    assert "user-01@example.com" in payload["description"]
+    assert "user-60@example.com" in payload["description"]
+    assert "user-60@example.com" in payload["work_notes"]
+    assert "... 10 more" not in payload["description"]
+
+
 def test_service_now_draft_candidates_merge_and_disable_groups() -> None:
     namespace = _exec_weekly_report_draft_cell_definitions()
     summary_df = pd.DataFrame(
@@ -465,3 +496,33 @@ def test_service_now_draft_raw_table_is_collapsed_by_default() -> None:
     assert "<details class='snow-draft-raw-table'" in html
     assert "<details class='snow-draft-raw-table' open" not in html
     assert "raw_table_accordion.selected_index = None" in draft_cell
+
+
+def test_service_now_draft_grid_ui_contract() -> None:
+    namespace = _exec_weekly_report_draft_cell_definitions()
+    row = {
+        "alert_type": "configuration_drift",
+        "integration_name": "Slack Enterprise",
+        "integration_alias": "Slack",
+        "security_check_name": "MFA required",
+        "impact_level": "High",
+        "current_status": "Failed",
+        "affected_entities_count": 6,
+        "affected_entities_detail": (
+            "user-01@example.com; user-02@example.com; user-03@example.com; "
+            "user-04@example.com; user-05@example.com; user-06@example.com"
+        ),
+        "change_datetime": "2026-07-03T00:00:00Z",
+    }
+    html = namespace["_snow_draft_candidate_grid_html"](row)
+    draft_cell = "".join(_weekly_report_notebook_cells()[5].get("source", ""))
+
+    assert "snow-draft-grid-row" in html
+    assert "user-01@example.com" in html
+    assert "user-05@example.com" in html
+    assert "user-06@example.com" in html
+    assert "<summary style='cursor:pointer;font-weight:600'>Details</summary>" in html
+    assert "Enable ServiceNow draft opener" not in draft_cell
+    assert "show_passed_checkbox" in draft_cell
+    assert "show_existing_ticket_checkbox" in draft_cell
+    assert "sort_order_dropdown" in draft_cell
