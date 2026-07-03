@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import textwrap
 from pathlib import Path
 from typing import Any
 
@@ -73,13 +75,34 @@ def _exec_weekly_report_mapping_cell(tmp_path: Path, monkeypatch: pytest.MonkeyP
     return namespace
 
 
+def _exec_weekly_report_draft_cell_definitions() -> dict[str, Any]:
+    cells = _weekly_report_notebook_cells()
+    draft_cell = "".join(cells[5].get("source", ""))
+    draft_cell = draft_cell.rsplit("_snow_draft_render_ui()", 1)[0]
+
+    namespace: dict[str, Any] = {
+        "Any": Any,
+        "HTML": lambda value: value,
+        "Path": Path,
+        "display": lambda *args, **kwargs: None,
+        "json": json,
+        "os": os,
+        "pd": pd,
+        "re": re,
+        "textwrap": textwrap,
+        "widgets": None,
+    }
+    exec(draft_cell, namespace)
+    return namespace
+
+
 def test_weekly_report_notebook_contract() -> None:
     cells = _weekly_report_notebook_cells()
 
     assert len(cells) == 7
 
     expected_heads = {
-        0: "# Adaptive Shield Weekly Report (MVP)",
+        0: "# Falcon SaaS Security Weekly Report",
         1: "# Cell 1: Standalone Initialization (bootstrap + functions + variables)",
         2: "# Cell 2: Unified Data Fetching + Processing (with stage progress)",
         3: "# Cell 3: Alerts UI (ServiceNow toggle)",
@@ -195,3 +218,81 @@ def test_service_now_mapping_editor_fields_and_first_match(
     assert assignment["caller_id"] == "David Shih"
     assert assignment["assignment_group"] == "First Team"
     assert assignment["assigned_to"] == "First Owner"
+
+def test_falcon_servicenow_defaults_and_guides_use_falcon_copy() -> None:
+    project_root = Path(__file__).resolve().parents[1]
+    env_example = (project_root / ".env.example").read_text()
+
+    assert "API_SOURCE=falcon" in env_example
+    assert "SNOW_INCIDENT_QUERY=short_descriptionLIKEFalcon Shield" in env_example
+    assert "SNOW_INCIDENT_QUERY=short_descriptionLIKEAdaptiveShield" not in env_example
+
+    cells = _weekly_report_notebook_cells()
+    intro_cell = "".join(cells[0].get("source", ""))
+    init_cell = "".join(cells[1].get("source", ""))
+    draft_cell = "".join(cells[5].get("source", ""))
+
+    assert "# Falcon SaaS Security Weekly Report" in intro_cell
+    assert "CrowdStrike Falcon SaaS Security" in intro_cell
+    assert "ServiceNow enrichment can be enabled with Falcon Shield incident mapping." in intro_cell
+    assert 'SNOW_DEFAULT_INCIDENT_QUERY = "short_descriptionLIKEFalcon Shield"' in init_cell
+    assert 'os.getenv("SNOW_INCIDENT_QUERY", SNOW_DEFAULT_INCIDENT_QUERY)' in init_cell
+    assert 'base_query = _safe_text(config.get("snow_incident_query")) or SNOW_DEFAULT_INCIDENT_QUERY' in init_cell
+    assert "is_snow_weekly_report_short_description(short_description)" in init_cell
+    assert "short_descriptionLIKEAdaptiveShield" not in init_cell
+    assert "Adaptive Shield Incident Draft" not in draft_cell
+    assert "Adaptive Shield alert requires ServiceNow incident review." not in draft_cell
+
+    for guide_path in [
+        project_root / "docs" / "as_weekly_report_falcon_saas_security.html",
+        project_root / "notebooks" / "as_weekly_report_falcon_saas_security.html",
+    ]:
+        guide = guide_path.read_text()
+        assert "Falcon Shield &lt;Alert Type&gt;: [&lt;integration_alias&gt;] &lt;security_check_name&gt;" in guide
+        assert "Adaptive Shield &lt;Alert Type&gt;: [&lt;integration_alias&gt;] &lt;security_check_name&gt;" not in guide
+
+
+def test_service_now_short_description_parser_accepts_falcon_prefixes() -> None:
+    init_cell = "".join(_weekly_report_notebook_cells()[1].get("source", ""))
+    relevant = init_cell[init_cell.index("def normalize_match_text") : init_cell.index("def _fallback_match_key")]
+    namespace: dict[str, Any] = {"Any": Any, "re": re}
+    exec(relevant, namespace)
+
+    assert namespace["is_snow_weekly_report_short_description"]("Falcon Shield Configuration Drift: [Slack] MFA")
+    assert namespace["is_snow_weekly_report_short_description"]("Falcon SaaS Security saas: Slack | alias: SlackProd | check: MFA")
+    assert namespace["is_snow_weekly_report_short_description"]("AdaptiveShield saas: Slack | alias: SlackProd | check: MFA")
+    assert not namespace["is_snow_weekly_report_short_description"]("Random incident")
+    assert namespace["parse_short_description_key"]("Falcon Shield SaaS | SlackProd | MFA required") == "saas | slackprod | mfa required"
+    assert namespace["parse_short_description_key"]("Falcon SaaS Security saas: Slack | alias: SlackProd | check: MFA required") == "slack | slackprod | mfa required"
+
+
+def test_service_now_draft_payload_uses_falcon_copy() -> None:
+    namespace = _exec_weekly_report_draft_cell_definitions()
+    payload = namespace["_snow_draft_payload"](
+        {
+            "alert_id": "alert-1",
+            "alert_type": "configuration_drift",
+            "account_name": "Primary",
+            "account_id": "cid-1",
+            "integration_name": "Slack Enterprise",
+            "integration_alias": "Slack",
+            "saas_name": "Slack",
+            "security_check_name": "MFA required",
+            "security_check_api_link": "https://falcon.example/checks/1",
+            "impact_level": "High",
+            "current_status": "open",
+            "affected_scope": "entity",
+            "affected_entities_count": 3,
+            "change_datetime": "2026-07-02T00:00:00Z",
+        },
+        {"impact": "2", "urgency": "2", "category": "Security"},
+    )
+
+    assert payload["short_description"] == "Falcon Shield Configuration Drift: [Slack] MFA required"
+    assert "Falcon Shield alert requires ServiceNow incident review." in payload["description"]
+    assert "Falcon Shield Incident Draft" in payload["work_notes"]
+    assert "Falcon Shield" in payload["work_notes"]
+    assert "Adaptive Shield" not in payload["short_description"]
+    assert "Adaptive Shield" not in payload["description"]
+    assert "Adaptive Shield" not in payload["work_notes"]
+
