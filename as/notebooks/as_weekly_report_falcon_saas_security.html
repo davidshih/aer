@@ -525,27 +525,32 @@ FS_CLIENT_SECRET=your_client_secret</code></pre>
         <li><strong>Cell 1:</strong> Loads <code>.env</code>, reads Falcon settings, and prepares helper functions.</li>
         <li><strong>Cell 2:</strong> Gets alerts, security check details, affected resources, ServiceNow mappings, and quality checks.</li>
         <li><strong>Cell 3:</strong> Shows the alert UI with optional ServiceNow ticket context.</li>
-        <li><strong>Cell 4:</strong> Lists alerts missing open tickets and opens selected ServiceNow draft forms with plain text description and HTML work notes.</li>
-        <li><strong>Cell 5:</strong> Exports XLSX and CSV files.</li>
+        <li><strong>Cell 4:</strong> Edits the ServiceNow draft assignment mapping CSV and clears prior widget output when rerun.</li>
+        <li><strong>Cell 5:</strong> Shows a compact grid of draft candidates and opens selected ServiceNow draft forms with plain text description and HTML work notes.</li>
+        <li><strong>Cell 6:</strong> Exports XLSX and CSV files.</li>
       </ul>
     </section>
 
     <section class="section panel">
-      <h2>Cell 4: ServiceNow Draft Behavior</h2>
-      <p>Cell 4 is a helper for manual review. It opens draft incident forms and pre-fills fields, but it never saves, updates, or submits an incident.</p>
+      <h2>Cell 5: ServiceNow Draft Behavior</h2>
+      <p>Cell 5 is a helper for manual review. It opens draft incident forms and pre-fills fields, but it never saves, updates, or submits an incident.</p>
       <div class="grid-3" style="margin-top: 16px;">
         <div class="mini-card green">
-          <strong>Default people fields</strong>
-          Caller is <code>David Shih</code>, assignment group is <code>SN-informationSecurity</code>, and assigned to is <code>David Shih</code>.
+          <strong>State and assignment</strong>
+          State is always set to <code>In Progress</code>. Caller, assignment group, and assigned to come from the first matching mapping row, then environment defaults.
         </div>
         <div class="mini-card blue">
           <strong>Description</strong>
-          The <code>description</code> field gets easy-to-read plain text only, so ServiceNow does not show raw HTML there.
+          The <code>description</code> field gets human-readable plain text with paragraphs, indentation, numbered affected entities, and full affected entity details.
         </div>
         <div class="mini-card purple">
           <strong>Work notes</strong>
           The <code>work_notes</code> field gets <code>[code]...HTML...[/code]</code>, because that is where ServiceNow renders the HTML correctly.
         </div>
+      </div>
+      <div class="mini-card blue" style="background: var(--blue-soft); border-color: #38bdf8; margin-top: 14px;">
+        <strong>Draft population method</strong>
+        Field population uses the existing ServiceNow page session with <code>g_form.setValue(...)</code> and display-box events. It does not call the ServiceNow Table API or REST lookups while creating draft tabs, so it should not trigger an extra sign-in prompt.
       </div>
       <div class="mini-card yellow" style="background: var(--yellow-soft); border-color: #facc15; margin-top: 14px;">
         <strong>Hidden memory</strong>
@@ -556,12 +561,12 @@ FS_CLIENT_SECRET=your_client_secret</code></pre>
         <div class="step">
           <div class="num">1</div>
           <h3>Pick alerts</h3>
-          <p>The checkbox list only shows alerts with no open ServiceNow ticket and no hidden-memory match.</p>
+          <p>The compact grid shows draft candidate groups with affected counts, top five affected names, and folded details. Use toggles to hide Passed rows, existing-ticket rows, or hidden-memory rows.</p>
         </div>
         <div class="step">
           <div class="num">2</div>
-          <h3>Skip noise</h3>
-          <p>Alerts whose security check contains <code>Entra ID Federated</code> are hidden from the draft list.</p>
+          <h3>Sort and review</h3>
+          <p>Sort by alert date newest-first or oldest-first. Alerts whose security check contains <code>Entra ID Federated</code> are excluded from the draft list.</p>
         </div>
         <div class="step">
           <div class="num">3</div>
@@ -589,7 +594,7 @@ FS_CLIENT_SECRET=your_client_secret</code></pre>
           </tr>
           <tr>
             <td><code>description</code></td>
-            <td>Plain text sections: summary, links and IDs, check details, remediation, affected entities, and timeline history.</td>
+            <td>Human-readable plain text sections: summary, links and IDs, check details, remediation, affected entities, and timeline history. Affected entity details are included without truncating the ticket text.</td>
           </tr>
           <tr>
             <td><code>work_notes</code></td>
@@ -600,8 +605,12 @@ FS_CLIENT_SECRET=your_client_secret</code></pre>
             <td>CSV mapping values first, then environment defaults.</td>
           </tr>
           <tr>
+            <td><code>state</code></td>
+            <td>Always set to <code>In Progress</code>.</td>
+          </tr>
+          <tr>
             <td><code>caller_id</code>, <code>assignment_group</code>, <code>assigned_to</code></td>
-            <td>Set through ServiceNow reference-field friendly display values.</td>
+            <td>Set with the original page-only <code>g_form</code> display-value method. No REST lookup is used during draft creation.</td>
           </tr>
         </tbody>
       </table>
@@ -609,13 +618,14 @@ FS_CLIENT_SECRET=your_client_secret</code></pre>
       <pre><code>SNOW_DRAFT_CALLER=David Shih
 SNOW_DRAFT_ASSIGNMENT_GROUP=SN-informationSecurity
 SNOW_DRAFT_ASSIGNED_TO=David Shih
+SNOW_DRAFT_FORM_READY_SECONDS=15
 SNOW_DRAFT_TAB_DELAY_SECONDS=1.5
 SNOW_DRAFT_HIDDEN_ALERTS_PATH=</code></pre>
     </section>
 
     <section class="section panel">
-      <h2>ServiceNow Draft Assignment Map</h2>
-      <p>Use this if certain integrations should go to a specific team or person.</p>
+      <h2>Cell 4: ServiceNow Draft Assignment Map</h2>
+      <p>Use this if certain integrations should go to a specific team or person. Rerunning the mapping editor clears the old widget output before showing the current saved mapping table.</p>
       <pre><code>SNOW_DRAFT_ASSIGNMENT_MAPPING_PATH=config/snow_draft_assignment_mapping.csv</code></pre>
       <table>
         <thead>

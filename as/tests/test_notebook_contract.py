@@ -374,10 +374,11 @@ def test_service_now_draft_assignment_mapping_and_form_population_contract() -> 
     assert payload["assignment_group"] == "Identity Security"
     assert payload["assigned_to"] == "Alex Owner"
     assert payload["state"] == "In Progress"
-    assert "execute_async_script" in draft_cell
-    assert "SNOW_DRAFT_REFERENCE_TABLES" in draft_cell
-    assert "lookupReferenceSysId" in draft_cell
-    assert "setChoiceByLabel" in draft_cell
+    assert "execute_script(script, payload, sorted(SNOW_DRAFT_REFERENCE_FIELDS))" in draft_cell
+    assert "execute_async_script" not in draft_cell
+    assert "SNOW_DRAFT_REFERENCE_TABLES" not in draft_cell
+    assert "lookupReferenceSysId" not in draft_cell
+    assert "/api/now/table/" not in draft_cell
     assert "SNOW_DRAFT_FORM_READY_SECONDS" in draft_cell
 
 
