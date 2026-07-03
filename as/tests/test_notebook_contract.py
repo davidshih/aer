@@ -577,8 +577,21 @@ def test_service_now_draft_grid_ui_contract() -> None:
     assert "user-01@example.com" in html
     assert "user-05@example.com" in html
     assert "user-06@example.com" in html
+    assert "2026-07-02 (thu) 08:00pm EDT" in html
+    assert "flex-direction:column" in html
     assert "<summary style='cursor:pointer;font-weight:600'>Details</summary>" in html
     assert "Enable ServiceNow draft opener" not in draft_cell
-    assert "show_passed_checkbox" in draft_cell
-    assert "show_existing_ticket_checkbox" in draft_cell
+    assert "widgets.ToggleButtons" in draft_cell
+    assert 'options=[("Hide", "hide"), ("Show", "show")]' in draft_cell
+    assert "hidden_visibility_toggle" in draft_cell
+    assert "passed_visibility_toggle" in draft_cell
+    assert "existing_ticket_visibility_toggle" in draft_cell
+    assert "show_passed_checkbox" not in draft_cell
+    assert "show_existing_ticket_checkbox" not in draft_cell
     assert "sort_order_dropdown" in draft_cell
+
+
+def test_service_now_draft_alert_datetime_label_uses_new_york_time() -> None:
+    namespace = _exec_weekly_report_draft_cell_definitions()
+
+    assert namespace["_snow_draft_alert_datetime_label"]("2026-07-01T05:01:00Z") == "2026-07-01 (wed) 01:01am EDT"

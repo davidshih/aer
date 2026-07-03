@@ -248,6 +248,25 @@ def _snow_draft_datetime(value: Any) -> Any:
         return pd.NaT
 
 
+def _snow_draft_alert_datetime_label(value: Any) -> str:
+    parsed = _snow_draft_datetime(value)
+    if not _snow_draft_is_valid_datetime(parsed):
+        return _snow_draft_text(value) or "No alert date"
+
+    try:
+        ny_timestamp = parsed.tz_convert("America/New_York")
+    except Exception:
+        try:
+            ny_timestamp = parsed.tz_localize("UTC").tz_convert("America/New_York")
+        except Exception:
+            return _snow_draft_text(value) or "No alert date"
+
+    weekday = ny_timestamp.strftime("%a").lower()
+    time_label = ny_timestamp.strftime("%I:%M%p").lower()
+    timezone_label = ny_timestamp.strftime("%Z")
+    return f"{ny_timestamp.strftime('%Y-%m-%d')} ({weekday}) {time_label} {timezone_label}".strip()
+
+
 def _snow_draft_is_valid_datetime(value: Any) -> bool:
     try:
         return not pd.isna(value)
@@ -522,6 +541,16 @@ def _snow_draft_badge_html(label: str, bg: str, color: str, border: str) -> str:
     )
 
 
+def _snow_draft_badge_stack_html(badges: list[str]) -> str:
+    if not badges:
+        return "<div style='margin-top:6px;color:#94a3b8;font-size:11px'>No tags</div>"
+    return (
+        "<div style='display:flex;flex-direction:column;align-items:flex-start;gap:3px;margin-top:6px'>"
+        + "".join(f"<div>{badge}</div>" for badge in badges)
+        + "</div>"
+    )
+
+
 def _snow_draft_candidate_grid_header_html() -> str:
     return (
         "<div class='snow-draft-grid-header' "
@@ -540,7 +569,7 @@ def _snow_draft_candidate_grid_html(row: dict[str, Any]) -> str:
     integration = _snow_draft_text(row.get("integration_name")) or _snow_draft_text(row.get("saas_name")) or "Unknown integration"
     alias = _snow_draft_text(row.get("integration_alias"))
     check_name = _snow_draft_text(row.get("security_check_name")) or _snow_draft_text(row.get("security_check")) or "Unknown security check"
-    latest = _snow_draft_text(row.get("change_datetime")) or "No alert date"
+    latest = _snow_draft_alert_datetime_label(row.get("change_datetime"))
     affected = _snow_draft_affected_count_label(row)
     entity_names = _snow_draft_entity_names(row)
     top_entities = entity_names[:5]
@@ -602,7 +631,7 @@ def _snow_draft_candidate_grid_html(row: dict[str, Any]) -> str:
         f"style='width:100%;display:grid;grid-template-columns:minmax(110px,.8fr) minmax(180px,1fr) minmax(260px,1.5fr) minmax(150px,1fr) minmax(130px,.8fr);"
         f"gap:8px;align-items:start;border-bottom:1px solid {border};background:{background};padding:6px 8px;color:{text_color};font-size:12px;line-height:1.35'>"
         f"<div style='font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#475569'>{_snow_draft_html_escape(latest)}</div>"
-        f"<div><div style='font-weight:700'>{_snow_draft_html_escape(integration)}{alias_html}</div><div style='margin-top:4px'>{''.join(badges)}</div></div>"
+        f"<div><div style='font-weight:700'>{_snow_draft_html_escape(integration)}{alias_html}</div>{_snow_draft_badge_stack_html(badges)}</div>"
         f"<div style='font-weight:600'>{_snow_draft_html_escape(check_name)}</div>"
         f"<div><b>{_snow_draft_html_escape(affected)}</b>{top_entity_html}</div>"
         f"<div>{ticket_line}</div>"
@@ -1426,21 +1455,25 @@ def _snow_draft_render_ui() -> None:
         display(HTML(_snow_draft_raw_table_html(visible_df)))
         return
 
-    show_hidden_checkbox = widgets.Checkbox(
-        value=False,
-        description="Show hidden Falcon Shield alerts",
-        indent=False,
-    )
-    show_passed_checkbox = widgets.Checkbox(
-        value=True,
-        description="Show Passed",
-        indent=False,
-    )
-    show_existing_ticket_checkbox = widgets.Checkbox(
-        value=True,
-        description="Show existing tickets",
-        indent=False,
-    )
+    def _snow_draft_visibility_filter(label: str) -> tuple[Any, Any]:
+        toggle = widgets.ToggleButtons(
+            options=[("Hide", "hide"), ("Show", "show")],
+            value="hide",
+            layout=widgets.Layout(width="170px"),
+            style={"button_width": "82px"},
+        )
+        box = widgets.VBox(
+            [
+                widgets.HTML(f"<div style='font-size:11px;font-weight:700;color:#334155;text-transform:uppercase;letter-spacing:0'>{_snow_draft_html_escape(label)}</div>"),
+                toggle,
+            ],
+            layout=widgets.Layout(width="180px"),
+        )
+        return box, toggle
+
+    hidden_filter_box, hidden_visibility_toggle = _snow_draft_visibility_filter("Hidden alerts")
+    passed_filter_box, passed_visibility_toggle = _snow_draft_visibility_filter("Passed checks")
+    existing_ticket_filter_box, existing_ticket_visibility_toggle = _snow_draft_visibility_filter("Existing tickets")
     sort_order_dropdown = widgets.Dropdown(
         options=[
             ("Alert date: newest first", "latest"),
@@ -1481,11 +1514,11 @@ def _snow_draft_render_ui() -> None:
         grouped_df = _snow_draft_grouped_candidates_df(refreshed_df)
         if grouped_df.empty:
             return grouped_df
-        if not bool(show_hidden_checkbox.value):
+        if hidden_visibility_toggle.value != "show":
             grouped_df = grouped_df[~grouped_df["snow_draft_is_hidden"]].copy()
-        if not bool(show_passed_checkbox.value):
+        if passed_visibility_toggle.value != "show":
             grouped_df = grouped_df[~grouped_df["snow_draft_is_passed_configuration_drift"]].copy()
-        if not bool(show_existing_ticket_checkbox.value):
+        if existing_ticket_visibility_toggle.value != "show":
             grouped_df = grouped_df[~grouped_df["snow_draft_is_servicenow_mapped"]].copy()
         return _sort_visible_df(grouped_df)
 
@@ -1496,12 +1529,17 @@ def _snow_draft_render_ui() -> None:
         current_disabled_count = int(current_df["snow_draft_is_disabled"].sum()) if not current_df.empty else 0
         total_hidden_count = len(hidden_registry.get("hidden_keys", {}))
         duplicate_count = int(current_df["snow_draft_duplicate_count"].map(lambda value: max(_snow_draft_int(value, 1) - 1, 0)).sum()) if not current_df.empty else 0
+        hidden_mode = "shown" if hidden_visibility_toggle.value == "show" else "hidden"
+        passed_mode = "shown" if passed_visibility_toggle.value == "show" else "hidden"
+        existing_ticket_mode = "shown" if existing_ticket_visibility_toggle.value == "show" else "hidden"
         candidate_summary.value = (
             f"<b>ServiceNow draft incident candidates</b><br>"
             f"<span style='font-size:12px;color:#475569'>"
             f"Showing {len(current_df)} group(s); auto-hidden duplicate rows: {duplicate_count}. "
             f"Disabled groups: {current_disabled_count}. Hidden memory has {total_hidden_count} alert/check key(s). "
-            f"Hidden visible now: {current_hidden_count}. Sorted by alert date."
+            f"Hidden visible now: {current_hidden_count}. "
+            f"Filters: hidden alerts {hidden_mode}; passed checks {passed_mode}; existing tickets {existing_ticket_mode}. "
+            f"Sorted by alert date."
             f"</span>"
         )
 
@@ -1646,21 +1684,34 @@ def _snow_draft_render_ui() -> None:
     unhide_selected_button.on_click(_on_unhide_selected)
     clear_hidden_button.on_click(_on_clear_hidden_memory)
     open_button.on_click(_on_open)
-    show_hidden_checkbox.observe(_on_filter_or_sort_change, names="value")
-    show_passed_checkbox.observe(_on_filter_or_sort_change, names="value")
-    show_existing_ticket_checkbox.observe(_on_filter_or_sort_change, names="value")
+    hidden_visibility_toggle.observe(_on_filter_or_sort_change, names="value")
+    passed_visibility_toggle.observe(_on_filter_or_sort_change, names="value")
+    existing_ticket_visibility_toggle.observe(_on_filter_or_sort_change, names="value")
     sort_order_dropdown.observe(_on_filter_or_sort_change, names="value")
 
     _render_candidate_list()
 
+    filter_panel = widgets.VBox(
+        [
+            candidate_summary,
+            widgets.HTML(
+                "<span style='font-size:12px;color:#475569'>Default view keeps hidden alerts, passed checks, and existing-ticket groups out of the work queue.</span>"
+            ),
+            widgets.HBox(
+                [hidden_filter_box, passed_filter_box, existing_ticket_filter_box, sort_order_dropdown],
+                layout=widgets.Layout(width="100%", align_items="flex-end", flex_flow="row wrap", gap="8px"),
+            ),
+        ],
+        layout=widgets.Layout(border="1px solid #cbd5e1", padding="10px", margin="0 0 8px 0", width="100%"),
+    )
+
     display(
         widgets.VBox(
             [
-                candidate_summary,
+                filter_panel,
                 widgets.HTML(
-                    "<span style='font-size:12px;color:#475569'>Select alert/check groups, then open pre-filled ServiceNow draft tabs for manual review. Duplicates are merged by account, integration, and check. ServiceNow-mapped and Passed items are greyed out unless hidden by filter.</span>"
+                    "<span style='font-size:12px;color:#475569'>Select alert/check groups, then open pre-filled ServiceNow draft tabs for manual review. Duplicates are merged by account, integration, and check. ServiceNow-mapped and Passed items are greyed out when shown.</span>"
                 ),
-                widgets.HBox([show_hidden_checkbox, show_passed_checkbox, show_existing_ticket_checkbox, sort_order_dropdown]),
                 widgets.HBox([select_all_button, clear_button, hide_selected_button, unhide_selected_button]),
                 widgets.HBox([clear_hidden_button, open_button]),
                 candidate_box,
